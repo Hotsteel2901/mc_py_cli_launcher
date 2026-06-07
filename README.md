@@ -112,4 +112,4 @@ python mc_launcher.py --help
 
 ## 许可证
 
-MIT License
+[GPL v3](LICENSE)
