@@ -37,3 +37,25 @@ jobs:
         with:
           name: ${{ matrix.artifact }}
           path: dist/${{ matrix.artifact }}
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ github.run_number }}
+          name: Build ${{ github.run_number }}
+          body: 自动构建 - ${{ github.sha }}
+          files: |
+            artifacts/mc_launcher.exe/mc_launcher.exe
+            artifacts/mc_launcher-linux/mc_launcher-linux
+            artifacts/mc_launcher-macos/mc_launcher-macos
