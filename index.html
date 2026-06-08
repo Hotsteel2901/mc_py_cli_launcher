@@ -3,91 +3,99 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>MC CLI Launcher</title>
+<title>MC CLI Launcher - 简洁的 Minecraft 命令行启动器</title>
+<!-- 修复了 Open Graph 图片链接，确保分享时有预览图 -->
+<meta property="og:image" content="https://opengraph.githubassets.com/af68025253eba5c4b7dc07bdba9a0b540e7c0522eb195a5821705cc0c00fffe1/Hotsteel2901/mc_py_cli_launcher">
 <style>
-*{margin:0;padding:0;box-sizing:border-box}
-body{background:#0d1117;color:#c9d1d9;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;line-height:1.6}
-a{color:#58a6ff;text-decoration:none}
-a:hover{text-decoration:underline}
-.container{max-width:800px;margin:0 auto;padding:20px}
-header{text-align:center;padding:60px 20px 40px;border-bottom:1px solid #21262d}
-header h1{font-size:2.5rem;color:#e6edf3;font-family:SFMono-Regular,Consolas,"Liberation Mono",Menlo,monospace}
-header p{color:#8b949e;margin:12px 0 24px;font-size:1.1rem}
-.btn{display:inline-block;padding:12px 28px;border-radius:6px;font-weight:600;font-size:1rem;transition:all .2s}
-.btn-primary{background:#238636;color:#fff;border:1px solid #2ea043}
-.btn-primary:hover{background:#2ea043;text-decoration:none}
-section{padding:40px 20px;border-bottom:1px solid #21262d}
-section h2{font-size:1.5rem;color:#e6edf3;margin-bottom:24px;font-family:SFMono-Regular,Consolas,"Liberation Mono",Menlo,monospace}
-.grid{display:grid;grid-template-columns:1fr;gap:16px}
-@media(min-width:600px){.grid{grid-template-columns:1fr 1fr}}
-.card{background:#161b22;border:1px solid #21262d;border-radius:8px;padding:20px}
-.card h3{color:#58a6ff;font-size:1rem;margin-bottom:8px}
-.card p{color:#8b949e;font-size:.9rem}
-table{width:100%;border-collapse:collapse;font-size:.95rem}
-th,td{padding:12px 16px;text-align:left;border-bottom:1px solid #21262d}
-th{color:#e6edf3;font-weight:600;background:#161b22}
-td{color:#c9d1d9}
-.code-block{background:#161b22;border:1px solid #21262d;border-radius:8px;padding:16px 20px;font-family:SFMono-Regular,Consolas,"Liberation Mono",Menlo,monospace;font-size:.85rem;color:#c9d1d9;overflow-x:auto;margin:12px 0;line-height:1.8}
-.code-block .prompt{color:#238636}
-.code-block .comment{color:#8b949e}
-footer{text-align:center;padding:32px 20px;color:#484f58;font-size:.85rem}
-footer a{color:#58a6ff}
-@media(max-width:599px){header h1{font-size:1.8rem}header p{font-size:.95rem}.container{padding:12px}}
+    * {margin:0;padding:0;box-sizing:border-box}
+    body {background:#0d1117;color:#c9d1d9;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;line-height:1.6}
+    a {color:#58a6ff;text-decoration:none}
+    a:hover {text-decoration:underline}
+    .container {max-width:800px;margin:0 auto;padding:20px}
+    header {text-align:center;padding:60px 20px 40px;border-bottom:1px solid #21262d}
+    header h1 {font-size:2.5rem;color:#e6edf3;font-family:SFMono-Regular,Consolas,"Liberation Mono",Menlo,monospace}
+    header p {color:#8b949e;margin:12px 0 24px;font-size:1.1rem}
+    .btn {display:inline-block;padding:12px 28px;border-radius:6px;font-weight:600;font-size:1rem;transition:all .2s}
+    .btn-primary {background:#238636;color:#fff;border:1px solid #2ea043}
+    .btn-primary:hover {background:#2ea043;transform:scale(1.05)} /* 增强悬停反馈 */
+    section {padding:40px 20px;border-bottom:1px solid #21262d}
+    section h2 {font-size:1.5rem;color:#e6edf3;margin-bottom:24px;font-family:SFMono-Regular,Consolas,"Liberation Mono",Menlo,monospace}
+    .grid {display:grid;grid-template-columns:1fr;gap:16px}
+    @media (min-width:600px) {.grid {grid-template-columns:1fr 1fr}}
+    .card {background:#161b22;border:1px solid #21262d;border-radius:8px;padding:20px;transition:transform .2s}
+    .card:hover {transform:translateY(-2px);border-color:#30363d} /* 增加卡片悬停效果 */
+    .card h3 {color:#58a6ff;font-size:1rem;margin-bottom:8px}
+    .card p {color:#8b949e;font-size:.9rem}
+    table {width:100%;border-collapse:collapse;font-size:.95rem}
+    th,td {padding:12px 16px;text-align:left;border-bottom:1px solid #21262d}
+    th {color:#e6edf3;font-weight:600;background:#161b22}
+    td {color:#c9d1d9}
+    .code-block {background:#161b22;border:1px solid #21262d;border-radius:8px;padding:16px 20px;font-family:SFMono-Regular,Consolas,"Liberation Mono",Menlo,monospace;font-size:.85rem;color:#c9d1d9;overflow-x:auto;margin:12px 0;line-height:1.8}
+    .code-block .prompt {color:#238636}
+    .code-block .comment {color:#8b949e}
+    footer {text-align:center;padding:32px 20px;color:#484f58;font-size:.85rem}
+    @media (max-width:599px) {header h1 {font-size:1.8rem}header p {font-size:.95rem}.container {padding:12px}}
 </style>
 </head>
 <body>
-<div class="container">
-<header>
-<h1>MC CLI Launcher</h1>
-<p>简洁的 Minecraft 命令行启动器 — Microsoft 登录、Fabric 模组加载器、Modrinth 模组管理</p>
-<a href="https://github.com/Hotsteel2901/mc_py_cli_launcher" class="btn btn-primary">View on GitHub</a>
-</header>
-<section>
-<h2>功能特性</h2>
-<div class="grid">
-<div class="card">
-<h3>Microsoft OAuth2 登录</h3>
-<p>支持设备码流程，安全便捷地登录你的 Minecraft 账号</p>
-</div>
-<div class="card">
-<h3>Fabric 模组加载器</h3>
-<p>一键安装 Fabric Loader，自动下载依赖库</p>
-</div>
-<div class="card">
-<h3>Modrinth 模组管理</h3>
-<p>搜索、安装、更新模组，自动检测加载器类型</p>
-</div>
-<div class="card">
-<h3>多线程下载</h3>
-<p>带进度条和 SHA-1 校验，断点续传，高效稳定</p>
-</div>
-</div>
-</section>
-<section>
-<h2>下载</h2>
-<p style="color:#8b949e;margin-bottom:16px">前往 <a href="https://github.com/Hotsteel2901/mc_py_cli_launcher/actions">Actions</a> 页面下载最新构建产物：</p>
-<table>
-<thead>
-<tr><th>平台</th><th>文件名</th></tr>
-</thead>
-<tbody>
-<tr><td>Windows</td><td>mc_launcher.exe</td></tr>
-<tr><td>Linux</td><td>mc_launcher-linux</td></tr>
-<tr><td>macOS</td><td>mc_launcher-macos</td></tr>
-</tbody>
-</table>
-<p style="color:#8b949e;margin-top:12px;font-size:.9rem">Linux/macOS 下载后需添加执行权限：<code style="background:#161b22;padding:2px 6px;border-radius:4px">chmod +x mc_launcher-*</code></p>
-</section>
-<section>
-<h2>使用教程</h2>
-<div class="code-block">
-<span class="comment"># 获取指令</span><br>
-<span class="prompt">$</span> python mc_launcher.py -h<br>
-</div>
-</section>
-<footer>
-<p>Licensed under <a href="https://github.com/Hotsteel2901/mc_py_cli_launcher/blob/main/LICENSE">GPL v3</a></p>
-</footer>
-</div>
+    <div class="container">
+        <header>
+            <h1>MC CLI Launcher</h1>
+            <p>简洁的 Minecraft 命令行启动器 — Microsoft 登录、Fabric 模组加载器、Modrinth 模组管理</p>
+            <a href="https://github.com/Hotsteel2901/mc_py_cli_launcher" target="_blank" class="btn btn-primary">View on GitHub</a>
+        </header>
+
+        <section>
+            <h2>功能特性</h2>
+            <div class="grid">
+                <div class="card">
+                    <h3>Microsoft OAuth2 登录</h3>
+                    <p>支持设备码流程，安全便捷地登录你的 Minecraft 账号</p>
+                </div>
+                <div class="card">
+                    <h3>Fabric 模组加载器</h3>
+                    <p>一键安装 Fabric Loader，自动下载依赖库</p>
+                </div>
+                <div class="card">
+                    <h3>Modrinth 模组管理</h3>
+                    <p>搜索、安装、更新模组，自动检测加载器类型</p>
+                </div>
+                <div class="card">
+                    <h3>多线程下载</h3>
+                    <p>带进度条和 SHA-1 校验，断点续传，高效稳定</p>
+                </div>
+            </div>
+        </section>
+
+        <section>
+            <h2>下载</h2>
+            <p style="color:#8b949e;margin-bottom:16px">前往 <a href="https://github.com/Hotsteel2901/mc_py_cli_launcher/actions" target="_blank">Actions</a> 页面下载最新构建产物：</p>
+            <table>
+                <thead>
+                    <tr><th>平台</th><th>文件名</th></tr>
+                </thead>
+                <tbody>
+                    <tr><td>Windows</td><td>mc_launcher.exe</td></tr>
+                    <tr><td>Linux</td><td>mc_launcher-linux</td></tr>
+                    <tr><td>macOS</td><td>mc_launcher-macos</td></tr>
+                </tbody>
+            </table>
+            <p style="color:#8b949e;margin-top:12px;font-size:.9rem">
+                Linux/macOS 下载后需添加执行权限：<code style="background:#161b22;padding:2px 6px;border-radius:4px">chmod +x mc_launcher-*</code>
+            </p>
+        </section>
+
+        <section>
+            <h2>使用教程</h2>
+            <div class="code-block">
+                <span class="comment"># 获取指令帮助</span><br>
+                <span class="prompt">$</span> python mc_launcher.py -h
+            </div>
+        </section>
+
+        <footer>
+            <p>当前时间：2026-06-08 星期一 | Licensed under <a href="https://github.com/Hotsteel2901/mc_py_cli_launcher/blob/main/LICENSE" target="_blank">GPL v3</a></p>
+        </footer>
+    </div>
 </body>
 </html>
