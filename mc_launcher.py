@@ -1291,7 +1291,8 @@ class MinecraftLauncher:
             self._java = check_java()
         return self._java
 
-    def launch(self, version_id=None, account_data=None, ram_mb=4096, use_fabric=False):
+    def launch(self, version_id=None, account_data=None, ram_mb=4096,
+               use_fabric=False, width=None, height=None):
         if account_data is None:
             account_data = self.accounts.get_default()
         if account_data is None:
@@ -1445,8 +1446,8 @@ class MinecraftLauncher:
             "${classpath}":         classpath,
             "${natives_directory}": str(natives_dir),
             "${library_directory}": str(self.versions.libraries_dir),
-            "${resolution_width}":  "854",
-            "${resolution_height}": "480",
+            "${resolution_width}":  str(width) if width else "854",
+            "${resolution_height}": str(height) if height else "480",
         }
 
         def replace_tokens(args_list):
@@ -1543,39 +1544,57 @@ class MinecraftLauncher:
     def assets_dir(self):
         return self.versions.assets_dir
 
+def _parse_ram(value):
+    """Parse RAM string like '4G', '2048M', or plain integer in MB."""
+    if isinstance(value, int):
+        return value
+    value = str(value).strip().upper()
+    m = re.match(r'^(\d+(?:\.\d+)?)\s*(G|GB|M|MB)?$', value)
+    if not m:
+        raise argparse.ArgumentTypeError(
+            f"Invalid RAM value: '{value}'. Use format like 4G, 2048M, or a plain number in MB.")
+    num = float(m.group(1))
+    unit = (m.group(2) or "M").upper()
+    if unit.startswith("G"):
+        return int(num * 1024)
+    return int(num)
+
 def main():
     parser = argparse.ArgumentParser(
         description="Simple Minecraft CLI Launcher — Microsoft + offline + Modrinth mods",
         epilog="Examples:\n"
-               "  %(prog)s login                    # Microsoft login (save credentials)\n"
-               "  %(prog)s login --device-code       # Login via device code (simpler, no paste)\n"
-               "  %(prog)s offline Steve            # Offline mode (save credentials)\n"
-               "  %(prog)s launch                   # Launch with saved account + version\n"
-               "  %(prog)s launch -v 1.21.4         # Launch specific version\n"
-               "  %(prog)s launch --fabric           # Launch with Fabric + mods\n"
-               "  %(prog)s download                 # Download latest version only\n"
+               "  %(prog)s login                       # Microsoft login (device code, recommended)\n"
+               "  %(prog)s login --browser              # Browser login (copy-paste URL)\n"
+               "  %(prog)s offline Steve               # Offline mode (save credentials)\n"
+               "  %(prog)s play                        # Launch with saved account + version\n"
+               "  %(prog)s play -v 1.21.4              # Launch specific version\n"
+               "  %(prog)s play -v 1.21.4 --ram 4G     # Allocate 4 GB RAM\n"
+               "  %(prog)s play --fabric                # Launch with Fabric + mods\n"
+               "  %(prog)s accounts                    # Show saved accounts\n"
+               "  %(prog)s download                    # Download latest version only\n"
                "  %(prog)s download -v 1.20.1 --no-assets  # Jar+libs only\n"
                "  %(prog)s download --threads 16           # 16-thread download\n"
-               "  %(prog)s list-versions            # List all Minecraft versions\n"
-               "  %(prog)s list-loaders             # List all mod loaders\n"
-               "  %(prog)s search sodium            # Search mods on Modrinth\n"
-               "  %(prog)s install-fabric -v 1.21.4 # Install Fabric loader\n"
-               "  %(prog)s install-mod sodium -v 1.21.4  # Install a mod\n"
-               "  %(prog)s list-installed           # List locally installed versions\n"
-               "  %(prog)s list-mods -v 1.21.4      # List mods for a version\n"
-               "  %(prog)s disable-mod sodium -v 1.21.4  # Disable a mod\n"
-               "  %(prog)s enable-mod sodium -v 1.21.4   # Re-enable a mod\n"
-               "  %(prog)s uninstall-mod sodium -v 1.21.4  # Uninstall a mod\n"
-               "  %(prog)s logout                   # Clear saved session",
+               "  %(prog)s list-versions               # List all Minecraft versions\n"
+               "  %(prog)s list-loaders                # List all mod loaders\n"
+               "  %(prog)s search sodium               # Search mods on Modrinth\n"
+               "  %(prog)s install-fabric -v 1.21.4    # Install Fabric loader\n"
+               "  %(prog)s install-mod sodium -v 1.21.4     # Install a mod\n"
+               "  %(prog)s list-installed              # List locally installed versions\n"
+               "  %(prog)s list-mods -v 1.21.4         # List mods for a version\n"
+               "  %(prog)s disable-mod sodium -v 1.21.4     # Disable a mod\n"
+               "  %(prog)s enable-mod sodium -v 1.21.4      # Re-enable a mod\n"
+               "  %(prog)s uninstall-mod sodium -v 1.21.4   # Uninstall a mod\n"
+               "  %(prog)s logout                      # Clear saved session",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument("action", nargs="?", default="launch",
-                        choices=["login", "offline", "launch", "download", "logout",
+    parser.add_argument("action", nargs="?", default="play",
+                        choices=["login", "offline", "play", "launch", "download",
+                                 "logout", "accounts",
                                  "list-versions", "list-loaders", "list-installed",
                                  "list-mods", "search",
                                  "install-fabric", "install-mod",
                                  "disable-mod", "enable-mod", "uninstall-mod"],
-                        help="Action to perform")
+                        help="Action to perform ('play' and 'launch' are equivalent)")
     parser.add_argument("query", nargs="?", default=None,
                         help="Username (offline mode) or mod search query / mod slug")
     parser.add_argument("--version", "-v", default=None,
@@ -1590,25 +1609,63 @@ def main():
                         help="Max search results (default: 10)")
     parser.add_argument("--dir", "-d", default=str(DEFAULT_DIR),
                         help=f"Game directory (default: {DEFAULT_DIR})")
-    parser.add_argument("--ram", "-r", type=int, default=4096,
-                        help="RAM in MB (default: 4096)")
+    parser.add_argument("--ram", "-r", type=_parse_ram, default="4G",
+                        help="RAM allocation (default: 4G). Accepts: 4G, 2048M, or plain MB number")
+    parser.add_argument("--java", "-j", default=None,
+                        help="Path to Java executable (auto-detected if omitted)")
+    parser.add_argument("--width", type=int, default=None,
+                        help="Game window width in pixels")
+    parser.add_argument("--height", type=int, default=None,
+                        help="Game window height in pixels")
     parser.add_argument("--no-assets", action="store_true",
                         help="Skip asset downloads (jar + libraries only)")
     parser.add_argument("--threads", "-t", type=int, default=4,
                         help="Parallel download threads (default: 4, max: 32)")
     parser.add_argument("--fabric", action="store_true",
                         help="Launch with Fabric loader (auto-detected if installed)")
-    parser.add_argument("--device-code", action="store_true",
-                        help="Use device code login (no browser copy-paste needed)")
+    parser.add_argument("--browser", action="store_true",
+                        help="Use browser login instead of device code (requires URL copy-paste)")
 
     args = parser.parse_args()
     game_dir = Path(args.dir)
 
+    # Normalize aliases
+    if args.action == "launch":
+        args.action = "play"
+
     launcher = MinecraftLauncher(game_dir, threads=args.threads)
+
+    # Override Java path if specified
+    if args.java:
+        launcher._java = args.java
 
     if args.action == "logout":
         launcher.accounts.clear()
         print("  Cleared all saved accounts.")
+        return
+
+    if args.action == "accounts":
+        log.header("Saved Accounts")
+        default_key = launcher.accounts.data.get("default")
+        accs = launcher.accounts.data.get("accounts", {})
+        if not accs:
+            log.warn("No accounts saved.")
+            log.info("Login:  python mc_launcher.py login")
+            log.info("Offline: python mc_launcher.py offline <username>")
+            return
+        for key, acc in accs.items():
+            is_default = " (default)" if key == default_key else ""
+            acc_type = acc.get("type", "?")
+            username = acc.get("username", "?")
+            print(f"  [{acc_type}] {username}{is_default}")
+            if acc_type == "msa":
+                expires = acc.get("expires_at", 0)
+                if time.time() > expires:
+                    print(f"         Session expired — will auto-refresh on next launch")
+                else:
+                    remaining = expires - time.time()
+                    hours = int(remaining // 3600)
+                    print(f"         Session valid (~{hours}h remaining)")
         return
 
     if args.action == "list-versions":
@@ -1824,17 +1881,16 @@ def main():
         return
 
     if args.action == "login":
-        if args.device_code:
-            log.header("Microsoft Device Code Login")
-            auth = MicrosoftAuth()
-            auth.device_code_login()
-        else:
-            log.header("Microsoft Login")
+        if args.browser:
+            log.header("Microsoft Login (Browser)")
             log.info("A browser window will open. Log in with your Microsoft account.")
             log.info("Make sure your Microsoft account owns Minecraft!\n")
-            log.info("Tip: use --device-code for a simpler experience (no copy-paste).\n")
+            log.info("Tip: omit --browser to use device code login (simpler, no copy-paste).\n")
             auth = MicrosoftAuth()
             auth.login()
+        else:
+            auth = MicrosoftAuth()
+            auth.device_code_login()
 
         uid = auth.uuid
         if len(uid) == 32:
@@ -1860,11 +1916,15 @@ def main():
         log.header("Download Only")
         launcher.download_version(args.version, skip_assets=args.no_assets)
 
-    elif args.action == "launch":
+    elif args.action == "play":
         account = launcher.accounts.get_default()
         if not account:
-            log.die("No saved account. Run 'login' or 'offline <name>' first.")
-        launcher.launch(args.version, account, args.ram, use_fabric=args.fabric)
+            log.die("No saved account. Run 'login' or 'offline <name>' first.",
+                    hint="  python mc_launcher.py login        # Microsoft login\n"
+                         "  python mc_launcher.py offline Steve # Offline mode")
+        launcher.launch(args.version, account, args.ram,
+                        use_fabric=args.fabric,
+                        width=args.width, height=args.height)
 
 if __name__ == "__main__":
     main()

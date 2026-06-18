@@ -3,99 +3,454 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>MC CLI Launcher - 简洁的 Minecraft 命令行启动器</title>
-<!-- 修复了 Open Graph 图片链接，确保分享时有预览图 -->
+<title>MC CLI Launcher</title>
 <meta property="og:image" content="https://opengraph.githubassets.com/af68025253eba5c4b7dc07bdba9a0b540e7c0522eb195a5821705cc0c00fffe1/Hotsteel2901/mc_py_cli_launcher">
 <style>
-    * {margin:0;padding:0;box-sizing:border-box}
-    body {background:#0d1117;color:#c9d1d9;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;line-height:1.6}
-    a {color:#58a6ff;text-decoration:none}
-    a:hover {text-decoration:underline}
-    .container {max-width:800px;margin:0 auto;padding:20px}
-    header {text-align:center;padding:60px 20px 40px;border-bottom:1px solid #21262d}
-    header h1 {font-size:2.5rem;color:#e6edf3;font-family:SFMono-Regular,Consolas,"Liberation Mono",Menlo,monospace}
-    header p {color:#8b949e;margin:12px 0 24px;font-size:1.1rem}
-    .btn {display:inline-block;padding:12px 28px;border-radius:6px;font-weight:600;font-size:1rem;transition:all .2s}
-    .btn-primary {background:#238636;color:#fff;border:1px solid #2ea043}
-    .btn-primary:hover {background:#2ea043;transform:scale(1.05)} /* 增强悬停反馈 */
-    section {padding:40px 20px;border-bottom:1px solid #21262d}
-    section h2 {font-size:1.5rem;color:#e6edf3;margin-bottom:24px;font-family:SFMono-Regular,Consolas,"Liberation Mono",Menlo,monospace}
-    .grid {display:grid;grid-template-columns:1fr;gap:16px}
-    @media (min-width:600px) {.grid {grid-template-columns:1fr 1fr}}
-    .card {background:#161b22;border:1px solid #21262d;border-radius:8px;padding:20px;transition:transform .2s}
-    .card:hover {transform:translateY(-2px);border-color:#30363d} /* 增加卡片悬停效果 */
-    .card h3 {color:#58a6ff;font-size:1rem;margin-bottom:8px}
-    .card p {color:#8b949e;font-size:.9rem}
-    table {width:100%;border-collapse:collapse;font-size:.95rem}
-    th,td {padding:12px 16px;text-align:left;border-bottom:1px solid #21262d}
-    th {color:#e6edf3;font-weight:600;background:#161b22}
-    td {color:#c9d1d9}
-    .code-block {background:#161b22;border:1px solid #21262d;border-radius:8px;padding:16px 20px;font-family:SFMono-Regular,Consolas,"Liberation Mono",Menlo,monospace;font-size:.85rem;color:#c9d1d9;overflow-x:auto;margin:12px 0;line-height:1.8}
-    .code-block .prompt {color:#238636}
-    .code-block .comment {color:#8b949e}
-    footer {text-align:center;padding:32px 20px;color:#484f58;font-size:.85rem}
-    @media (max-width:599px) {header h1 {font-size:1.8rem}header p {font-size:.95rem}.container {padding:12px}}
+:root {
+  --bg: #0a0e14;
+  --surface: #0d1117;
+  --surface-2: #131920;
+  --border: #1c2530;
+  --border-glow: #0f3a0f;
+  --green: #00ff41;
+  --green-dim: #00cc33;
+  --green-dark: #003d10;
+  --green-glow: rgba(0,255,65,0.15);
+  --cyan: #4ec9b0;
+  --yellow: #e5c07b;
+  --red: #e06c75;
+  --gray: #636d7e;
+  --gray-dim: #3a4250;
+  --text: #abb2bf;
+  --text-bright: #d4daf0;
+  --font-mono: "Cascadia Code", "Fira Code", "JetBrains Mono", "Source Code Pro", "SF Mono", Consolas, "Liberation Mono", Menlo, monospace;
+}
+
+*{margin:0;padding:0;box-sizing:border-box}
+
+html{font-size:16px;-webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale;-webkit-text-size-adjust:100%}
+
+body{
+  background:var(--bg);
+  color:var(--text);
+  font-family:var(--font-mono);
+  line-height:1.7;
+  min-height:100vh;
+  overflow-x:hidden;
+}
+
+/* Subtle CRT scanline overlay */
+body::after{
+  content:"";
+  position:fixed;
+  top:0;right:0;bottom:0;left:0;
+  background:repeating-linear-gradient(
+    0deg,
+    transparent,
+    transparent 2px,
+    rgba(0,0,0,0.03) 2px,
+    rgba(0,0,0,0.03) 4px
+  );
+  pointer-events:none;
+  z-index:9999;
+}
+
+.container{max-width:820px;margin:0 auto;padding:0 24px}
+
+/* ---- HEADER ---- */
+header{
+  padding:80px 0 56px;
+  text-align:center;
+  position:relative;
+}
+
+header::after{
+  content:"";
+  display:block;
+  width:120px;
+  height:1px;
+  background:linear-gradient(90deg,transparent,var(--green),transparent);
+  margin:40px auto 0;
+  opacity:0.6;
+}
+
+.logo{
+  font-size:2.8rem;
+  font-weight:700;
+  color:var(--green);
+  letter-spacing:-0.02em;
+  text-shadow:0 0 20px var(--green-glow),0 0 60px rgba(0,255,65,0.06);
+  line-height:1.2;
+  margin-bottom:16px;
+}
+
+.logo .cursor{
+  display:inline-block;
+  width:3px;
+  height:0.85em;
+  background:var(--green);
+  margin-left:4px;
+  vertical-align:baseline;
+  position:relative;
+  top:0.1em;
+  animation:blink 1s step-end infinite;
+}
+
+@keyframes blink{
+  0%,100%{opacity:1}
+  50%{opacity:0}
+}
+
+.subtitle{
+  color:var(--gray);
+  font-size:0.92rem;
+  max-width:480px;
+  margin:0 auto 32px;
+  line-height:1.8;
+}
+
+.subtitle em{
+  color:var(--cyan);
+  font-style:normal;
+}
+
+.btn-primary{
+  display:inline-block;
+  padding:12px 32px;
+  border:1px solid var(--green-dark);
+  border-radius:4px;
+  color:var(--green);
+  font-family:var(--font-mono);
+  font-size:0.9rem;
+  font-weight:600;
+  text-decoration:none;
+  background:var(--green-dark);
+  background:linear-gradient(180deg,rgba(0,255,65,0.12) 0%,rgba(0,255,65,0.04) 100%);
+  transition:border-color .2s,box-shadow .2s,background .2s;
+  position:relative;
+}
+
+.btn-primary:hover{
+  border-color:var(--green);
+  box-shadow:0 0 16px var(--green-glow),inset 0 0 16px rgba(0,255,65,0.04);
+  text-decoration:none;
+}
+
+.btn-primary::before{
+  content:"> ";
+  opacity:0.5;
+}
+
+/* ---- TERMINAL WINDOW ---- */
+.terminal{
+  background:var(--surface);
+  border:1px solid var(--border);
+  border-radius:6px;
+  margin:0 0 48px;
+  overflow:hidden;
+}
+
+.terminal-bar{
+  display:flex;
+  align-items:center;
+  gap:6px;
+  padding:10px 16px;
+  background:var(--surface-2);
+  border-bottom:1px solid var(--border);
+}
+
+.terminal-dot{
+  width:10px;height:10px;border-radius:50%;
+}
+.terminal-dot.r{background:#e06c75}
+.terminal-dot.y{background:#e5c07b}
+.terminal-dot.g{background:#98c379}
+
+.terminal-title{
+  flex:1;
+  text-align:center;
+  font-size:0.75rem;
+  color:var(--gray);
+  letter-spacing:0.05em;
+}
+
+.terminal-body{
+  padding:20px 24px;
+  font-size:0.85rem;
+  line-height:2;
+}
+
+.terminal-body .prompt{
+  color:var(--green);
+  -webkit-user-select:none;user-select:none;
+}
+
+.terminal-body .cmd{
+  color:var(--text-bright);
+}
+
+.terminal-body .flag{
+  color:var(--cyan);
+}
+
+.terminal-body .comment{
+  color:var(--gray-dim);
+  display:block;
+  margin-bottom:2px;
+}
+
+.terminal-body .blank{
+  display:block;
+  height:0.6em;
+}
+
+/* ---- SECTION ---- */
+section{
+  padding:16px 0 56px;
+}
+
+.section-label{
+  font-size:0.7rem;
+  color:var(--green-dim);
+  letter-spacing:0.15em;
+  text-transform:uppercase;
+  margin-bottom:8px;
+}
+
+.section-title{
+  font-size:1.4rem;
+  color:var(--text-bright);
+  font-weight:700;
+  margin-bottom:32px;
+}
+
+/* ---- FEATURE CARDS ---- */
+.features-grid{
+  display:grid;
+  grid-template-columns:1fr;
+  gap:16px;
+}
+
+@media(min-width:560px){.features-grid{grid-template-columns:1fr 1fr}}
+
+.feature-card{
+  background:var(--surface);
+  border:1px solid var(--border);
+  border-radius:6px;
+  padding:20px 22px;
+  transition:border-color .25s,box-shadow .25s;
+  position:relative;
+}
+
+.feature-card:hover{
+  border-color:var(--border-glow);
+  box-shadow:0 0 20px rgba(0,255,65,0.04);
+}
+
+.feature-card::before{
+  content:"$";
+  position:absolute;
+  top:18px;right:18px;
+  color:var(--gray-dim);
+  font-size:0.75rem;
+  opacity:0.5;
+}
+
+.feature-label{
+  font-size:0.7rem;
+  color:var(--green-dim);
+  letter-spacing:0.1em;
+  text-transform:uppercase;
+  margin-bottom:6px;
+}
+
+.feature-title{
+  color:var(--green);
+  font-size:0.95rem;
+  font-weight:600;
+  margin-bottom:8px;
+}
+
+.feature-desc{
+  color:var(--gray);
+  font-size:0.82rem;
+  line-height:1.7;
+}
+
+/* ---- DOWNLOAD TABLE ---- */
+.download-table{
+  width:100%;
+  border-collapse:collapse;
+  font-size:0.88rem;
+}
+
+.download-table th{
+  color:var(--gray);
+  font-size:0.7rem;
+  letter-spacing:0.1em;
+  text-transform:uppercase;
+  text-align:left;
+  padding:12px 16px;
+  border-bottom:1px solid var(--border);
+  font-weight:600;
+}
+
+.download-table td{
+  padding:14px 16px;
+  border-bottom:1px solid var(--border);
+}
+
+.download-table code{
+  color:var(--cyan);
+  font-size:0.85rem;
+}
+
+.download-note{
+  color:var(--gray);
+  font-size:0.8rem;
+  margin-top:16px;
+  padding:12px 16px;
+  background:var(--surface);
+  border-radius:4px;
+  border:1px solid var(--border);
+}
+
+.download-note code{
+  color:var(--cyan);
+  font-size:0.8rem;
+}
+
+/* ---- FOOTER ---- */
+footer{
+  text-align:center;
+  padding:40px 0 48px;
+  border-top:1px solid var(--border);
+  margin-top:16px;
+}
+
+footer p{
+  font-size:0.78rem;
+  color:var(--gray-dim);
+}
+
+footer a{
+  color:var(--green-dim);
+  text-decoration:none;
+  transition:color .2s;
+}
+
+footer a:hover{color:var(--green)}
+
+/* ---- RESPONSIVE ---- */
+@media(max-width:559px){
+  .logo{font-size:1.9rem}
+  .subtitle{font-size:0.82rem}
+  header{padding:56px 0 40px}
+  .terminal-body{padding:16px 18px;font-size:0.78rem}
+  .section-title{font-size:1.15rem}
+  .container{padding:0 16px}
+}
 </style>
 </head>
 <body>
-    <div class="container">
-        <header>
-            <h1>MC CLI Launcher</h1>
-            <p>简洁的 Minecraft 命令行启动器 — Microsoft 登录、Fabric 模组加载器、Modrinth 模组管理</p>
-            <a href="https://github.com/Hotsteel2901/mc_py_cli_launcher" target="_blank" class="btn btn-primary">View on GitHub</a>
-        </header>
+<div class="container">
 
-        <section>
-            <h2>功能特性</h2>
-            <div class="grid">
-                <div class="card">
-                    <h3>Microsoft OAuth2 登录</h3>
-                    <p>支持设备码流程，安全便捷地登录你的 Minecraft 账号</p>
-                </div>
-                <div class="card">
-                    <h3>Fabric 模组加载器</h3>
-                    <p>一键安装 Fabric Loader，自动下载依赖库</p>
-                </div>
-                <div class="card">
-                    <h3>Modrinth 模组管理</h3>
-                    <p>搜索、安装、更新模组，自动检测加载器类型</p>
-                </div>
-                <div class="card">
-                    <h3>多线程下载</h3>
-                    <p>带进度条和 SHA-1 校验，断点续传，高效稳定</p>
-                </div>
-            </div>
-        </section>
+<header>
+  <div class="logo">MC CLI Launcher<span class="cursor"></span></div>
+  <p class="subtitle">
+    Minecraft 命令行启动器<br>
+    <em>设备码登录</em> · Fabric 加载器 · Modrinth 模组管理
+  </p>
+  <a href="https://github.com/Hotsteel2901/mc_py_cli_launcher" class="btn-primary">View on GitHub</a>
+</header>
 
-        <section>
-            <h2>下载</h2>
-            <p style="color:#8b949e;margin-bottom:16px">前往 <a href="https://github.com/Hotsteel2901/mc_py_cli_launcher/actions" target="_blank">Actions</a> 页面下载最新构建产物：</p>
-            <table>
-                <thead>
-                    <tr><th>平台</th><th>文件名</th></tr>
-                </thead>
-                <tbody>
-                    <tr><td>Windows</td><td>mc_launcher.exe</td></tr>
-                    <tr><td>Linux</td><td>mc_launcher-linux</td></tr>
-                    <tr><td>macOS</td><td>mc_launcher-macos</td></tr>
-                </tbody>
-            </table>
-            <p style="color:#8b949e;margin-top:12px;font-size:.9rem">
-                Linux/macOS 下载后需添加执行权限：<code style="background:#161b22;padding:2px 6px;border-radius:4px">chmod +x mc_launcher-*</code>
-            </p>
-        </section>
-
-        <section>
-            <h2>使用教程</h2>
-            <div class="code-block">
-                <span class="comment"># 获取指令帮助</span><br>
-                <span class="prompt">$</span> python mc_launcher.py -h
-            </div>
-        </section>
-
-        <footer>
-            <p>当前时间：2026-06-08 星期一 | Licensed under <a href="https://github.com/Hotsteel2901/mc_py_cli_launcher/blob/main/LICENSE" target="_blank">GPL v3</a></p>
-        </footer>
+<section>
+  <div class="section-label">Features</div>
+  <div class="section-title">功能特性</div>
+  <div class="features-grid">
+    <div class="feature-card">
+      <div class="feature-label">Auth</div>
+      <div class="feature-title">设备码登录</div>
+      <div class="feature-desc">一行命令登录 Microsoft 账号，无需复制粘贴 URL</div>
     </div>
+    <div class="feature-card">
+      <div class="feature-label">Loader</div>
+      <div class="feature-title">Fabric 模组加载器</div>
+      <div class="feature-desc">一键安装 Fabric Loader，自动下载依赖库</div>
+    </div>
+    <div class="feature-card">
+      <div class="feature-label">Mods</div>
+      <div class="feature-title">Modrinth 模组管理</div>
+      <div class="feature-desc">搜索、安装、更新模组，自动检测加载器类型</div>
+    </div>
+    <div class="feature-card">
+      <div class="feature-label">Download</div>
+      <div class="feature-title">多线程下载</div>
+      <div class="feature-desc">带进度条和 SHA-1 校验，断点续传，高效稳定</div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="section-label">Download</div>
+  <div class="section-title">下载</div>
+  <p style="color:var(--gray);margin-bottom:20px;font-size:0.88rem">
+    前往 <a href="https://github.com/Hotsteel2901/mc_py_cli_launcher/actions" style="color:var(--green)">Actions</a> 页面下载最新构建产物
+  </p>
+  <table class="download-table">
+    <thead>
+      <tr><th>平台</th><th>文件名</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>Windows</td><td><code>mc_launcher.exe</code></td></tr>
+      <tr><td>Linux</td><td><code>mc_launcher-linux</code></td></tr>
+      <tr><td>macOS</td><td><code>mc_launcher-macos</code></td></tr>
+    </tbody>
+  </table>
+  <div class="download-note">
+    Linux/macOS 下载后需添加执行权限：<code>chmod +x mc_launcher-*</code>
+  </div>
+</section>
+
+<section>
+  <div class="section-label">Getting Started</div>
+  <div class="section-title">使用教程</div>
+
+  <div class="terminal">
+    <div class="terminal-bar">
+      <span class="terminal-dot r"></span>
+      <span class="terminal-dot y"></span>
+      <span class="terminal-dot g"></span>
+      <span class="terminal-title">mc_launcher</span>
+    </div>
+    <div class="terminal-body">
+      <span class="comment"># 登录 Microsoft 账号（设备码，推荐）</span>
+      <span class="prompt">$ </span><span class="cmd">./mc_launcher login</span>
+      <span class="blank"></span>
+      <span class="comment"># 或使用浏览器登录</span>
+      <span class="prompt">$ </span><span class="cmd">./mc_launcher login</span> <span class="flag">--browser</span>
+      <span class="blank"></span>
+      <span class="comment"># 安装 Fabric 模组加载器</span>
+      <span class="prompt">$ </span><span class="cmd">./mc_launcher install-fabric</span> <span class="flag">-v 26.1.2</span>
+      <span class="blank"></span>
+      <span class="comment"># 搜索并安装模组</span>
+      <span class="prompt">$ </span><span class="cmd">./mc_launcher search sodium</span>
+      <span class="prompt">$ </span><span class="cmd">./mc_launcher install-mod sodium</span> <span class="flag">-v 26.1.2</span>
+      <span class="blank"></span>
+      <span class="comment"># 启动游戏</span>
+      <span class="prompt">$ </span><span class="cmd">./mc_launcher play</span> <span class="flag">-v 26.1.2</span>
+      <span class="blank"></span>
+      <span class="comment"># 指定内存 / 窗口大小 / Java 路径</span>
+      <span class="prompt">$ </span><span class="cmd">./mc_launcher play</span> <span class="flag">-v 26.1.2 --ram 4G --width 1920 --height 1080</span>
+      <span class="prompt">$ </span><span class="cmd">./mc_launcher play</span> <span class="flag">-v 26.1.2 --java "C:\Program Files\Java\jdk-21\bin\javaw.exe"</span>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <p>Licensed under <a href="https://github.com/Hotsteel2901/mc_py_cli_launcher/blob/main/LICENSE">GPL v3</a></p>
+</footer>
+
+</div>
 </body>
 </html>

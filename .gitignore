@@ -1,0 +1,32 @@
+# Minecraft runtime data (downloaded by the launcher)
+minecraft/assets/
+minecraft/libraries/
+minecraft/natives/
+minecraft/versions/
+minecraft/version_manifest_v2.json
+minecraft/launcher_accounts.json
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+*.spec
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+Thumbs.db
+.DS_Store
+
+# PyInstaller output
+*.manifest
+
+# AI assistant context
+CLAUDE.md

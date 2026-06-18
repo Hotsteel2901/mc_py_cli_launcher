@@ -1,4 +1,0 @@
-/tp 320.00 80.96 43
-/give @s minecraft:command_block
-/time set minecraft:day
-/time set minecraft:midnight
