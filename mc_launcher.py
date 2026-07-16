@@ -153,6 +153,7 @@ def _http_request(method: str, url: str, data=None, json_data=None,
                   max_retries: int = 3) -> tuple:
 
     head = (headers or {}).copy()
+    head.setdefault("User-Agent", f"{LAUNCHER_NAME}/{LAUNCHER_VER}")
     body = None
     if json_data is not None:
         body = json.dumps(json_data).encode("utf-8")
@@ -242,9 +243,11 @@ def _download_file(url: str, dest_path, label: str = "", sha1: str = None,
             log.warn(f"{label} appears corrupted, re-downloading...")
         dest.unlink(missing_ok=True)
 
+    headers = {"User-Agent": f"{LAUNCHER_NAME}/{LAUNCHER_VER}"}
     for attempt in range(max_retries):
         try:
-            with urlopen(url, timeout=120) as resp:
+            req = Request(url, headers=headers)
+            with urlopen(req, timeout=120) as resp:
                 try:
                     total = int(resp.headers.get("Content-Length", 0) or 0)
                 except (ValueError, TypeError):
@@ -657,6 +660,14 @@ class ForgeManager:
         return (f"{FORGE_MAVEN}/{mc_version}-{loader_version}/"
                 f"forge-{mc_version}-{loader_version}-installer.jar")
 
+    def _ensure_base_game(self, mc_version):
+        vm = VersionManager(self.game_dir)
+        version_id, version_data = vm.get_version_info(mc_version)
+        vm.download_client_jar(version_id, version_data)
+        profile_path = self.game_dir / "launcher_profiles.json"
+        if not profile_path.exists():
+            profile_path.write_text("{}", encoding="utf-8")
+
     def install(self, mc_version, loader_version_id=None):
         versions = self.get_available_versions(mc_version)
         if not versions:
@@ -671,6 +682,8 @@ class ForgeManager:
             loader_ver = rec if rec and rec in versions else versions[-1]
 
         log.info(f"Installing Forge {loader_ver} for Minecraft {mc_version}...")
+        self._ensure_base_game(mc_version)
+
         installer_url = self.installer_url(mc_version, loader_ver)
         installer_path = self.lib_dir / "forge" / f"forge-{mc_version}-{loader_ver}-installer.jar"
         installer_path.parent.mkdir(parents=True, exist_ok=True)
@@ -745,7 +758,9 @@ class NeoForgeManager:
         if len(parts) >= 3 and parts[0] == "1" and parts[1] == "20":
             patch = parts[2]
             if patch == "1":
-                return "47."
+                # 1.20.1 NeoForge builds were published under net.neoforged:forge,
+                # not net.neoforged:neoforge; use Forge loader for this MC version.
+                return None
             return f"20.{patch}"
         if len(parts) >= 2 and parts[0] == "1" and int(parts[1]) >= 21:
             minor = parts[1]
@@ -767,15 +782,27 @@ class NeoForgeManager:
         for v in root.findall(".//version"):
             text = v.text
             if text and text.startswith(prefix):
-                # ensure next char is digit to avoid matching 21.4 against 21.40
-                nxt = text[len(prefix):len(prefix)+1]
-                if nxt.isdigit():
+                rest = text[len(prefix):]
+                # Prefixes ending in a separator (e.g. "47.") are followed directly by digits.
+                # Prefixes like "21.4" must be followed by ".<digit>" to avoid matching 21.40.
+                if prefix.endswith((".", "-")):
+                    if rest and rest[0].isdigit():
+                        versions.append(text)
+                elif rest.startswith(".") and len(rest) > 1 and rest[1].isdigit():
                     versions.append(text)
         versions.sort(key=lambda x: [int(n) for n in re.findall(r'(\d+)', x) or [0]])
         return versions
 
     def installer_url(self, loader_version):
         return f"{NEOFORGE_MAVEN}/{loader_version}/neoforge-{loader_version}-installer.jar"
+
+    def _ensure_base_game(self, mc_version):
+        vm = VersionManager(self.game_dir)
+        version_id, version_data = vm.get_version_info(mc_version)
+        vm.download_client_jar(version_id, version_data)
+        profile_path = self.game_dir / "launcher_profiles.json"
+        if not profile_path.exists():
+            profile_path.write_text("{}", encoding="utf-8")
 
     def install(self, mc_version, loader_version_id=None):
         versions = self.get_available_versions(mc_version)
@@ -790,6 +817,8 @@ class NeoForgeManager:
             loader_ver = versions[-1]
 
         log.info(f"Installing NeoForge {loader_ver} for Minecraft {mc_version}...")
+        self._ensure_base_game(mc_version)
+
         installer_url = self.installer_url(loader_ver)
         installer_path = self.lib_dir / "neoforge" / f"neoforge-{loader_ver}-installer.jar"
         installer_path.parent.mkdir(parents=True, exist_ok=True)
