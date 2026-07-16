@@ -1744,6 +1744,17 @@ class MinecraftLauncher:
                 print(f"  Mods:    {len(mod_jars)} jar(s)")
 
         all_cp = [client_jar] + lib_jars + extra_cp
+
+        seen = set()
+        deduped_cp = []
+        for p in all_cp:
+            key = str(p)
+            if key not in seen:
+                seen.add(key)
+                deduped_cp.append(p)
+        if len(deduped_cp) < len(all_cp):
+            log.debug(f"Removed {len(all_cp) - len(deduped_cp)} duplicate classpath entry(ies)")
+        all_cp = deduped_cp
         classpath = sep.join(str(p) for p in all_cp)
 
         if loader_profile:
