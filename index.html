@@ -359,7 +359,7 @@ footer a:hover{color:var(--green)}
   <div class="logo">MC CLI Launcher<span class="cursor"></span></div>
   <p class="subtitle">
     Minecraft 命令行启动器<br>
-    <em>设备码登录</em> · Fabric 加载器 · Modrinth 模组管理
+    <em>设备码登录</em> · Fabric / Forge / NeoForge · Modrinth + CurseForge
   </p>
   <a href="https://github.com/Hotsteel2901/mc_py_cli_launcher" class="btn-primary">View on GitHub</a>
 </header>
@@ -375,13 +375,13 @@ footer a:hover{color:var(--green)}
     </div>
     <div class="feature-card">
       <div class="feature-label">Loader</div>
-      <div class="feature-title">Fabric 模组加载器</div>
-      <div class="feature-desc">一键安装 Fabric Loader，自动下载依赖库</div>
+      <div class="feature-title">Fabric / Forge / NeoForge</div>
+      <div class="feature-desc">三种主流加载器可选安装，版本隔离，互不冲突</div>
     </div>
     <div class="feature-card">
       <div class="feature-label">Mods</div>
-      <div class="feature-title">Modrinth 模组管理</div>
-      <div class="feature-desc">搜索、安装、更新模组，自动检测加载器类型</div>
+      <div class="feature-title">Modrinth + CurseForge</div>
+      <div class="feature-desc">默认 Modrinth 优先并自动回退 CurseForge，也可手动指定源</div>
     </div>
     <div class="feature-card">
       <div class="feature-label">Download</div>
@@ -430,19 +430,22 @@ footer a:hover{color:var(--green)}
       <span class="comment"># 或使用浏览器登录</span>
       <span class="prompt">$ </span><span class="cmd">./mc_launcher login</span> <span class="flag">--browser</span>
       <span class="blank"></span>
-      <span class="comment"># 安装 Fabric 模组加载器</span>
-      <span class="prompt">$ </span><span class="cmd">./mc_launcher install-fabric</span> <span class="flag">-v 26.1.2</span>
+      <span class="comment"># 安装模组加载器（Fabric / Forge / NeoForge）</span>
+      <span class="prompt">$ </span><span class="cmd">./mc_launcher install-fabric</span> <span class="flag">-v 1.21.4</span>
+      <span class="prompt">$ </span><span class="cmd">./mc_launcher install-forge</span> <span class="flag">-v 1.20.1</span>
+      <span class="prompt">$ </span><span class="cmd">./mc_launcher install-neoforge</span> <span class="flag">-v 1.21.4</span>
       <span class="blank"></span>
-      <span class="comment"># 搜索并安装模组</span>
+      <span class="comment"># 搜索模组（Modrinth 优先，自动回退 CurseForge）</span>
       <span class="prompt">$ </span><span class="cmd">./mc_launcher search sodium</span>
-      <span class="prompt">$ </span><span class="cmd">./mc_launcher install-mod sodium</span> <span class="flag">-v 26.1.2</span>
+      <span class="prompt">$ </span><span class="cmd">./mc_launcher search jei</span> <span class="flag">--source curseforge --curseforge-key YOUR_KEY</span>
       <span class="blank"></span>
-      <span class="comment"># 启动游戏</span>
-      <span class="prompt">$ </span><span class="cmd">./mc_launcher play</span> <span class="flag">-v 26.1.2</span>
+      <span class="comment"># 安装并启动</span>
+      <span class="prompt">$ </span><span class="cmd">./mc_launcher install-mod sodium</span> <span class="flag">-v 1.21.4</span>
+      <span class="prompt">$ </span><span class="cmd">./mc_launcher play</span> <span class="flag">-v 1.21.4 --fabric</span>
       <span class="blank"></span>
       <span class="comment"># 指定内存 / 窗口大小 / Java 路径</span>
-      <span class="prompt">$ </span><span class="cmd">./mc_launcher play</span> <span class="flag">-v 26.1.2 --ram 4G --width 1920 --height 1080</span>
-      <span class="prompt">$ </span><span class="cmd">./mc_launcher play</span> <span class="flag">-v 26.1.2 --java "C:\Program Files\Java\jdk-21\bin\javaw.exe"</span>
+      <span class="prompt">$ </span><span class="cmd">./mc_launcher play</span> <span class="flag">-v 1.21.4 --ram 4G --width 1920 --height 1080</span>
+      <span class="prompt">$ </span><span class="cmd">./mc_launcher play</span> <span class="flag">-v 1.21.4 --java "C:\Program Files\Java\jdk-21\bin\javaw.exe"</span>
     </div>
   </div>
 </section>
