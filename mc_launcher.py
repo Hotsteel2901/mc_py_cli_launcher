@@ -28,6 +28,7 @@ if sys.stdout and hasattr(sys.stdout, "reconfigure") and sys.stdout.encoding.low
 
 MS_CLIENT_ID   = "00000000402b5328"
 MS_REDIRECT    = "https://login.live.com/oauth20_desktop.srf"
+MS_SCOPE       = "service::user.auth.xboxlive.com::MBI_SSL"
 MS_AUTH_URL    = "https://login.live.com/oauth20_authorize.srf"
 MS_TOKEN_URL   = "https://login.live.com/oauth20_token.srf"
 MS_DEVICE_AUTH = "https://login.microsoftonline.com/consumers/oauth2/v2.0/devicecode"
@@ -48,6 +49,8 @@ LAUNCHER_NAME = "simple-mc-cli"
 LAUNCHER_VER  = "2.0.0"
 
 MODRINTH_API  = "https://api.modrinth.com/v2"
+FORGE_MAVEN = "https://maven.minecraftforge.net/net/minecraftforge/forge"
+NEOFORGE_MAVEN = "https://maven.neoforged.net/releases/net/neoforged/neoforge"
 FABRIC_PROJECT_ID = "P7dR8mSH"
 
 class _Log:
@@ -141,6 +144,7 @@ def _http_request(method: str, url: str, data=None, json_data=None,
                   max_retries: int = 3) -> tuple:
 
     head = (headers or {}).copy()
+    head.setdefault("User-Agent", f"{LAUNCHER_NAME}/{LAUNCHER_VER}")
     body = None
     if json_data is not None:
         body = json.dumps(json_data).encode("utf-8")
@@ -202,8 +206,19 @@ def _is_jar_intact(path: Path) -> bool:
     except OSError:
         return False
 
+def _maven_rel_path(name: str) -> str:
+    parts = name.split(":")
+    g, a, v = parts[0], parts[1], parts[2]
+    classifier = parts[3] if len(parts) > 3 else ""
+    jar_name = f"{a}-{v}"
+    if classifier:
+        jar_name += f"-{classifier}"
+    jar_name += ".jar"
+    return f"{g.replace('.', '/')}/{a}/{v}/{jar_name}"
+
 def _download_file(url: str, dest_path, label: str = "", sha1: str = None,
-                   max_retries: int = 3, show_progress: bool = True):
+                   max_retries: int = 3, show_progress: bool = True,
+                   extra_headers: dict = None):
     dest = Path(dest_path)
     dest.parent.mkdir(parents=True, exist_ok=True)
     label = label or dest.name
@@ -220,9 +235,13 @@ def _download_file(url: str, dest_path, label: str = "", sha1: str = None,
             log.warn(f"{label} appears corrupted, re-downloading...")
         dest.unlink(missing_ok=True)
 
+    headers = {"User-Agent": f"{LAUNCHER_NAME}/{LAUNCHER_VER}"}
+    if extra_headers:
+        headers.update(extra_headers)
     for attempt in range(max_retries):
         try:
-            with urlopen(url, timeout=120) as resp:
+            req = Request(url, headers=headers)
+            with urlopen(req, timeout=120) as resp:
                 try:
                     total = int(resp.headers.get("Content-Length", 0) or 0)
                 except (ValueError, TypeError):
@@ -330,14 +349,72 @@ class ModrinthAPI:
         dest = Path(dest_dir)
         dest.mkdir(parents=True, exist_ok=True)
         paths = []
-        for f in version_data.get("files", []):
+        files = version_data.get("files", [])
+
+        primary_files = [f for f in files if f.get("primary")]
+        if not primary_files:
+
+            primary_files = [f for f in files
+                             if not f["filename"].endswith("-sources.jar")
+                             and not f["filename"].endswith("-javadoc.jar")]
+
+        downloaded_names = set()
+        for f in primary_files:
             file_path = dest / f["filename"]
             if not file_path.exists():
                 _download_file(f["url"], file_path, label or f["filename"])
             else:
                 print(f"  {f['filename']} — cached")
             paths.append(file_path)
+            downloaded_names.add(f["filename"])
+
+        if downloaded_names:
+            for suffix in ("-sources.jar", "-javadoc.jar"):
+                for old in dest.glob(f"*{suffix}"):
+                    base = old.name[:-len(suffix)] + ".jar"
+                    if base in downloaded_names and old.exists():
+                        old.unlink()
+                        log.info(f"Removed stale {suffix[1:-4]} jar: {old.name}")
+
         return paths
+
+
+class ModrinthSource:
+    name = "modrinth"
+
+    def search(self, query, limit=10, offset=0, loader=None, game_version=None):
+        facets = [["project_type:mod"]]
+        if loader:
+            facets.append([f"categories:{loader.lower()}"])
+        if game_version:
+            facets.append([f"versions:{game_version}"])
+        result = ModrinthAPI.search_projects(query, index="relevance",
+                                              limit=limit, offset=offset,
+                                              facets=facets)
+        hits = result.get("hits", [])
+        for h in hits:
+            h["source"] = "modrinth"
+        return hits
+
+    def get_project(self, slug_or_id):
+        data = ModrinthAPI.get_project(slug_or_id)
+        data["source"] = "modrinth"
+        return data
+
+    def get_versions(self, project_id, loader=None, game_version=None, limit=50):
+        kwargs = {}
+        if loader:
+            kwargs["loaders"] = [loader.lower()]
+        if game_version:
+            kwargs["game_versions"] = [game_version]
+        versions = ModrinthAPI.get_project_versions(project_id, **kwargs)
+        for v in versions:
+            v["source"] = "modrinth"
+        return versions
+
+    def download(self, version_data, dest_dir, label=""):
+        return ModrinthAPI.download_version_files(version_data, dest_dir, label)
+
 
 class FabricManager:
     FABRIC_META = "https://meta.fabricmc.net/v2"
@@ -413,9 +490,271 @@ class FabricManager:
 
         return all_jars, profile
 
+
+class ForgeManager:
+    PROMOTIONS_URL = "https://files.minecraftforge.net/net/minecraftforge/forge/promotions_slim.json"
+    MAVEN_META_URL = "https://maven.minecraftforge.net/net/minecraftforge/forge/maven-metadata.xml"
+
+    def __init__(self, game_dir: Path):
+        self.game_dir = game_dir
+        self.lib_dir = game_dir / "libraries"
+
+    def get_available_versions(self, mc_version):
+        status, body = _http_get(self.MAVEN_META_URL)
+        if status != 200:
+            log.die(f"Forge maven metadata fetch failed ({status})")
+        import xml.etree.ElementTree as ET
+        root = ET.fromstring(body)
+        versions = []
+        prefix = f"{mc_version}-"
+        for v in root.findall(".//version"):
+            text = v.text
+            if text and text.startswith(prefix):
+                versions.append(text[len(prefix):])
+        versions.sort(key=lambda x: [int(n) for n in re.findall(r'(\d+)', x) or [0]])
+        return versions
+
+    def get_promotions(self):
+        status, body = _http_get(self.PROMOTIONS_URL)
+        if status != 200:
+            return {}
+        try:
+            return json.loads(body).get("promos", {})
+        except Exception:
+            return {}
+
+    def get_recommended_version(self, mc_version):
+        promos = self.get_promotions()
+        return promos.get(f"{mc_version}-recommended") or promos.get(f"{mc_version}-latest")
+
+    def installer_url(self, mc_version, loader_version):
+        return (f"{FORGE_MAVEN}/{mc_version}-{loader_version}/"
+                f"forge-{mc_version}-{loader_version}-installer.jar")
+
+    def _ensure_base_game(self, mc_version):
+        vm = VersionManager(self.game_dir)
+        version_id, version_data = vm.get_version_info(mc_version)
+        vm.download_client_jar(version_id, version_data)
+        profile_path = self.game_dir / "launcher_profiles.json"
+        if not profile_path.exists():
+            profile_path.write_text("{}", encoding="utf-8")
+
+    def install(self, mc_version, loader_version_id=None):
+        versions = self.get_available_versions(mc_version)
+        if not versions:
+            log.die(f"No Forge loader found for Minecraft {mc_version}")
+
+        if loader_version_id:
+            if loader_version_id not in versions:
+                log.die(f"Forge loader version '{loader_version_id}' not found for MC {mc_version}")
+            loader_ver = loader_version_id
+        else:
+            rec = self.get_recommended_version(mc_version)
+            loader_ver = rec if rec and rec in versions else versions[-1]
+
+        log.info(f"Installing Forge {loader_ver} for Minecraft {mc_version}...")
+        self._ensure_base_game(mc_version)
+
+        installer_url = self.installer_url(mc_version, loader_ver)
+        installer_path = self.lib_dir / "forge" / f"forge-{mc_version}-{loader_ver}-installer.jar"
+        installer_path.parent.mkdir(parents=True, exist_ok=True)
+        _download_file(installer_url, installer_path, f"Forge {loader_ver} installer")
+
+        java = check_java()
+        cmd = [java, "-jar", str(installer_path), "--installClient", str(self.game_dir)]
+        log.info("Running Forge installer (this may take a while)...")
+        try:
+            subprocess.run(cmd, check=True)
+        except subprocess.CalledProcessError as e:
+            log.die(f"Forge installer failed (exit {e.returncode})")
+
+        installed_id = f"{mc_version}-forge-{loader_ver}"
+        version_json_path = self.game_dir / "versions" / installed_id / f"{installed_id}.json"
+        if not version_json_path.exists():
+            candidates = sorted((self.game_dir / "versions").glob(f"{mc_version}-forge-*"))
+            if candidates:
+                installed_id = candidates[-1].name
+                version_json_path = candidates[-1] / f"{installed_id}.json"
+        if not version_json_path.exists():
+            log.die("Forge installer finished but version.json was not found.")
+
+        profile = self._build_profile(mc_version, installed_id, version_json_path)
+        profile_path = self.lib_dir / "forge" / f"forge-profile-{mc_version}.json"
+        profile_path.parent.mkdir(parents=True, exist_ok=True)
+        profile_path.write_text(json.dumps(profile, indent=2), encoding="utf-8")
+
+        log.success(f"Forge {loader_ver} installed for Minecraft {mc_version}")
+        return installed_id, profile
+
+    def _build_profile(self, mc_version, version_id, version_json_path):
+        version_data = json.loads(version_json_path.read_text(encoding="utf-8"))
+        merged = self._resolve_inherits(version_data, self.game_dir / "versions")
+        return {
+            "loader": "forge",
+            "mc_version": mc_version,
+            "version_id": version_id,
+            "mainClass": merged.get("mainClass"),
+            "libraries": merged.get("libraries", []),
+            "arguments": merged.get("arguments", {}),
+        }
+
+    def _resolve_inherits(self, version_data, versions_dir):
+        parent_id = version_data.get("inheritsFrom")
+        if not parent_id:
+            return version_data
+        parent_path = versions_dir / parent_id / f"{parent_id}.json"
+        if not parent_path.exists():
+            log.warn(f"Parent version {parent_id} not found; Forge may not launch.")
+            return version_data
+        parent = json.loads(parent_path.read_text(encoding="utf-8"))
+        merged_parent = self._resolve_inherits(parent, versions_dir)
+
+        merged = dict(merged_parent)
+        merged.update({k: v for k, v in version_data.items()
+                       if k != "libraries"})
+        merged["libraries"] = merged_parent.get("libraries", []) + version_data.get("libraries", [])
+        return merged
+
+
+class NeoForgeManager:
+    MAVEN_META_URL = "https://maven.neoforged.net/releases/net/neoforged/neoforge/maven-metadata.xml"
+
+    def __init__(self, game_dir: Path):
+        self.game_dir = game_dir
+        self.lib_dir = game_dir / "libraries"
+
+    @staticmethod
+    def _neoforge_prefix_for_mc(mc_version):
+        parts = mc_version.split(".")
+        if len(parts) >= 3 and parts[0] == "1" and parts[1] == "20":
+            patch = parts[2]
+            if patch == "1":
+                # 1.20.1 NeoForge builds were published under net.neoforged:forge,
+                # not net.neoforged:neoforge; use Forge loader for this MC version.
+                return None
+            return f"20.{patch}"
+        if len(parts) >= 2 and parts[0] == "1" and int(parts[1]) >= 21:
+            minor = parts[1]
+            patch = parts[2] if len(parts) >= 3 else "0"
+            return f"{minor}.{patch}"
+        return None
+
+    def get_available_versions(self, mc_version):
+        status, body = _http_get(self.MAVEN_META_URL)
+        if status != 200:
+            log.die(f"NeoForge maven metadata fetch failed ({status})")
+        import xml.etree.ElementTree as ET
+        root = ET.fromstring(body)
+        prefix = self._neoforge_prefix_for_mc(mc_version)
+        if not prefix:
+            log.die(f"Cannot determine NeoForge versions for Minecraft {mc_version}. "
+                    f"Specify --loader-version.")
+        versions = []
+        for v in root.findall(".//version"):
+            text = v.text
+            if text and text.startswith(prefix):
+                rest = text[len(prefix):]
+                # Prefixes ending in a separator (e.g. "47.") are followed directly by digits.
+                # Prefixes like "21.4" must be followed by ".<digit>" to avoid matching 21.40.
+                if prefix.endswith((".", "-")):
+                    if rest and rest[0].isdigit():
+                        versions.append(text)
+                elif rest.startswith(".") and len(rest) > 1 and rest[1].isdigit():
+                    versions.append(text)
+        versions.sort(key=lambda x: [int(n) for n in re.findall(r'(\d+)', x) or [0]])
+        return versions
+
+    def installer_url(self, loader_version):
+        return f"{NEOFORGE_MAVEN}/{loader_version}/neoforge-{loader_version}-installer.jar"
+
+    def _ensure_base_game(self, mc_version):
+        vm = VersionManager(self.game_dir)
+        version_id, version_data = vm.get_version_info(mc_version)
+        vm.download_client_jar(version_id, version_data)
+        profile_path = self.game_dir / "launcher_profiles.json"
+        if not profile_path.exists():
+            profile_path.write_text("{}", encoding="utf-8")
+
+    def install(self, mc_version, loader_version_id=None):
+        versions = self.get_available_versions(mc_version)
+        if not versions:
+            log.die(f"No NeoForge loader found for Minecraft {mc_version}")
+
+        if loader_version_id:
+            if loader_version_id not in versions:
+                log.die(f"NeoForge loader version '{loader_version_id}' not found.")
+            loader_ver = loader_version_id
+        else:
+            loader_ver = versions[-1]
+
+        log.info(f"Installing NeoForge {loader_ver} for Minecraft {mc_version}...")
+        self._ensure_base_game(mc_version)
+
+        installer_url = self.installer_url(loader_ver)
+        installer_path = self.lib_dir / "neoforge" / f"neoforge-{loader_ver}-installer.jar"
+        installer_path.parent.mkdir(parents=True, exist_ok=True)
+        _download_file(installer_url, installer_path, f"NeoForge {loader_ver} installer")
+
+        java = check_java()
+        cmd = [java, "-jar", str(installer_path), "--installClient", str(self.game_dir)]
+        log.info("Running NeoForge installer (this may take a while)...")
+        try:
+            subprocess.run(cmd, check=True)
+        except subprocess.CalledProcessError as e:
+            log.die(f"NeoForge installer failed (exit {e.returncode})")
+
+        installed_id = f"neoforge-{loader_ver}"
+        version_json_path = self.game_dir / "versions" / installed_id / f"{installed_id}.json"
+        if not version_json_path.exists():
+            candidates = sorted((self.game_dir / "versions").glob("neoforge-*"))
+            if candidates:
+                installed_id = candidates[-1].name
+                version_json_path = candidates[-1] / f"{installed_id}.json"
+        if not version_json_path.exists():
+            log.die("NeoForge installer finished but version.json was not found.")
+
+        profile = self._build_profile(mc_version, installed_id, version_json_path)
+        profile_path = self.lib_dir / "neoforge" / f"neoforge-profile-{mc_version}.json"
+        profile_path.parent.mkdir(parents=True, exist_ok=True)
+        profile_path.write_text(json.dumps(profile, indent=2), encoding="utf-8")
+
+        log.success(f"NeoForge {loader_ver} installed for Minecraft {mc_version}")
+        return installed_id, profile
+
+    def _build_profile(self, mc_version, version_id, version_json_path):
+        version_data = json.loads(version_json_path.read_text(encoding="utf-8"))
+        merged = self._resolve_inherits(version_data, self.game_dir / "versions")
+        return {
+            "loader": "neoforge",
+            "mc_version": mc_version,
+            "version_id": version_id,
+            "mainClass": merged.get("mainClass"),
+            "libraries": merged.get("libraries", []),
+            "arguments": merged.get("arguments", {}),
+        }
+
+    def _resolve_inherits(self, version_data, versions_dir):
+        parent_id = version_data.get("inheritsFrom")
+        if not parent_id:
+            return version_data
+        parent_path = versions_dir / parent_id / f"{parent_id}.json"
+        if not parent_path.exists():
+            log.warn(f"Parent version {parent_id} not found; NeoForge may not launch.")
+            return version_data
+        parent = json.loads(parent_path.read_text(encoding="utf-8"))
+        merged_parent = self._resolve_inherits(parent, versions_dir)
+
+        merged = dict(merged_parent)
+        merged.update({k: v for k, v in version_data.items()
+                       if k != "libraries"})
+        merged["libraries"] = merged_parent.get("libraries", []) + version_data.get("libraries", [])
+        return merged
+
+
 class ModManager:
     def __init__(self, game_dir: Path):
         self.game_dir = game_dir
+        self.modrinth = ModrinthSource()
 
     def _mods_dir(self, mc_version):
         d = self.game_dir / "versions" / mc_version / "mods"
@@ -438,62 +777,100 @@ class ModManager:
         vers.sort(key=_key)
         return vers
 
-    def search(self, query, limit=10):
-        result = ModrinthAPI.search_projects(query, index="relevance", limit=limit)
-        return result.get("hits", [])
+    def search(self, query, limit=10, game_version=None, loader=None):
+        return self.modrinth.search(query, limit=limit, loader=loader,
+                                    game_version=game_version)
+
+    LOADERS_SHOWN = ("fabric", "forge", "neoforge")
+    _RELEASE_MC_RE = re.compile(r'^\d+\.\d+(\.\d+)?$')
+
+    @staticmethod
+    def _mc_key(v):
+        parts = re.findall(r'\d+', v)
+        return tuple(int(p) for p in parts) if parts else (0,)
+
+    @classmethod
+    def summarize_loader_support(cls, versions):
+        """Map loader -> (highest release MC version, mod version supporting it)."""
+        support = {}
+        for v in versions:
+            gvs = [g for g in v.get("game_versions", [])
+                   if cls._RELEASE_MC_RE.match(g)] or v.get("game_versions", [])
+            if not gvs:
+                continue
+            top = max(gvs, key=cls._mc_key)
+            for l in v.get("loaders", []):
+                l = l.lower()
+                cur = support.get(l)
+                if cur is None or cls._mc_key(top) > cls._mc_key(cur[0]):
+                    support[l] = (top, v.get("version_number", v.get("id", "?")))
+        return support
+
+    def loader_support(self, project_id):
+        try:
+            return self.summarize_loader_support(self.modrinth.get_versions(project_id))
+        except SystemExit:
+            raise
+        except Exception:
+            return {}
+
+    @classmethod
+    def format_loader_support(cls, support):
+        parts = []
+        for l in cls.LOADERS_SHOWN:
+            if l in support:
+                mc, modver = support[l]
+                parts.append(f"{l} <= MC {mc} ({modver})")
+            else:
+                parts.append(f"{l} \u2014")
+        return "  |  ".join(parts)
 
     def _detect_loaders(self, mc_version):
         found = []
-        p = self.game_dir / "libraries" / "fabric" / f"fabric-profile-{mc_version}.json"
-        if p.exists():
-            found.append("fabric")
-
+        for loader in ("fabric", "neoforge", "forge"):
+            p = self.game_dir / "libraries" / loader / f"{loader}-profile-{mc_version}.json"
+            if p.exists():
+                found.append(loader)
         return found
+
+    def _pick_loader(self, mc_version, preferred=None):
+        if preferred:
+            return preferred
+        detected = self._detect_loaders(mc_version)
+        if not detected:
+            return None
+        if len(detected) == 1:
+            return detected[0]
+        order = ["fabric", "neoforge", "forge"]
+        for loader in order:
+            if loader in detected:
+                log.info(f"Multiple loaders detected; picked {loader}. Use --loader to override.")
+                return loader
+        return detected[0]
 
     def install(self, slug, mc_version, loader=None, version_id=None):
         log.info(f"Resolving mod: {slug}...")
-        project = ModrinthAPI.get_project(slug)
-        proj_title = project.get("title", slug)
-        proj_id = project["id"]
-
-        if not loader:
-            detected = self._detect_loaders(mc_version)
-            if detected:
-                loader = detected[0]
-                log.info(f"Auto-detected loader: {loader}")
-
-        kwargs = {"game_versions": [mc_version]}
+        loader = self._pick_loader(mc_version, loader)
         if loader:
-            kwargs["loaders"] = [loader]
+            log.info(f"Using loader: {loader}")
 
-        versions = ModrinthAPI.get_project_versions(proj_id, **kwargs)
-
-        if not versions and loader:
-            versions = ModrinthAPI.get_project_versions(proj_id, game_versions=[mc_version])
-
-        if not versions:
-            extra = f" for MC {mc_version}"
-            extra += f" ({loader})" if loader else ""
-            if not loader:
-                extra += "\n  Hint: install a loader first, or specify --loader manually"
-            log.die(f"No versions found for {proj_title}{extra}")
+        project, versions = self._resolve_mod(slug, mc_version, loader)
+        proj_title = project.get("title", slug)
 
         if version_id:
             target = None
             for v in versions:
-                if v["id"] == version_id:
+                if str(v["id"]) == str(version_id):
                     target = v
                     break
             if not target:
                 log.die(f"Version '{version_id}' not found for {proj_title}")
         else:
-
-            def _sort_key(v):
+            def _loader_match(v):
                 loaders = [l.lower() for l in v.get("loaders", [])]
-                loader_match = 0 if loader and loader.lower() in loaders else 1
-                date = v.get("date_published", "")
-                return (loader_match, date)
-            versions.sort(key=_sort_key)
+                return 0 if loader and loader.lower() in loaders else 1
+            versions.sort(key=lambda v: v.get("date_published", ""), reverse=True)
+            versions.sort(key=_loader_match)
             target = versions[0]
 
         ver_num = target.get("version_number", target["id"])
@@ -501,14 +878,119 @@ class ModManager:
         loaders_str = ", ".join(target.get("loaders", ["?"]))
         if loader and loader.lower() not in [l.lower() for l in target.get("loaders", [])]:
             log.warn(f"Note: selected version uses loader '{loaders_str}', not '{loader}'")
-        log.info(f"Installing {proj_title} {ver_num} (MC: {mc_str}, Loaders: {loaders_str})...")
+        log.info(f"Installing {proj_title}...")
+        print(f"    Mod version:   {ver_num}")
+        print(f"    Game versions: {mc_str}")
+        print(f"    Loaders:       {loaders_str}")
+
+        self._check_dependencies(target, mc_version, loader)
 
         dest_dir = self._mods_dir(mc_version)
-        paths = ModrinthAPI.download_version_files(target, dest_dir,
-                                                    f"{proj_title} {ver_num}")
+        paths = self.modrinth.download(target, dest_dir, f"{proj_title} {ver_num}")
         total_size = sum(p.stat().st_size for p in paths if p.exists())
         log.success(f"Installed {len(paths)} file(s) ({total_size / 1024:.1f} KB) -> {dest_dir}")
         return paths, target, project
+
+    def _check_dependencies(self, version_data, mc_version, loader):
+        """检测模组依赖并醒目打印，提醒用户手动安装缺失的 required 依赖。"""
+        deps = [d for d in version_data.get("dependencies", []) if d.get("project_id")]
+        if not deps:
+            return
+
+        dest_dir = self._mods_dir(mc_version)
+        existing_jars = [f.name.lower() for f in dest_dir.glob("*.jar")
+                         if not f.name.endswith(("-sources.jar", "-javadoc.jar", ".disabled"))]
+
+        required_missing = []
+        optional_list = []
+        for dep in deps:
+            dep_pid = dep["project_id"]
+            dep_type = dep.get("dependency_type", "required")
+            try:
+                dep_proj = self.modrinth.get_project(dep_pid)
+            except Exception as e:
+                log.warn(f"Could not resolve dependency {dep_pid}: {e}")
+                continue
+            dep_title = dep_proj.get("title", dep_pid)
+            dep_slug = dep_proj.get("slug", dep_pid)
+
+            dep_versions = self.modrinth.get_versions(dep_pid, loader=loader,
+                                                      game_version=mc_version)
+            if dep_versions:
+                def _dk(v):
+                    loaders = [l.lower() for l in v.get("loaders", [])]
+                    return 0 if loader and loader.lower() in loaders else 1
+                dep_versions.sort(key=lambda v: v.get("date_published", ""), reverse=True)
+                dep_versions.sort(key=_dk)
+                dep_ver_num = dep_versions[0].get("version_number", dep_versions[0]["id"])
+                dep_mc = ", ".join(dep_versions[0].get("game_versions", ["?"]))
+            else:
+                dep_ver_num = "(no matching version)"
+                dep_mc = "?"
+
+            dep_key_lower = dep_slug.lower()
+            dep_title_lower = dep_title.lower().replace(" ", "_")
+            present = any(dep_key_lower in n or dep_title_lower in n
+                          for n in existing_jars)
+
+            if dep_type == "required":
+                if present:
+                    log.info(f"[dep: required] {dep_title} — already installed")
+                else:
+                    required_missing.append((dep_title, dep_slug, dep_ver_num, dep_mc))
+            else:
+                if present:
+                    log.info(f"[dep: optional] {dep_title} — already installed")
+                optional_list.append((dep_title, dep_slug, dep_ver_num, dep_mc, present))
+
+        if required_missing or optional_list:
+            print()
+            log.header("Dependencies")
+            if required_missing:
+                print(f"  {_Log.BOLD}{_Log.RED}[ MUST INSTALL ] Required dependencies:{_Log.RESET}")
+                for title, slug, ver, mc in required_missing:
+                    print(f"    {_Log.RED}- {title}{_Log.RESET}")
+                    print(f"      slug:    {slug}")
+                    print(f"      version: {ver}  (MC: {mc})")
+                    print(f"      install: python mc_launcher.py install-mod {slug} -v {mc_version}" +
+                          (f" --loader {loader}" if loader else ""))
+            if optional_list:
+                print(f"  {_Log.BOLD}{_Log.YELLOW}[ RECOMMENDED ] Optional dependencies:{_Log.RESET}")
+                for title, slug, ver, mc, present in optional_list:
+                    mark = f"{_Log.GREEN}[installed]{_Log.RESET} " if present else ""
+                    print(f"    {mark}{title}")
+                    print(f"      slug:    {slug}")
+                    print(f"      version: {ver}  (MC: {mc})")
+                    print(f"      install: python mc_launcher.py install-mod {slug} -v {mc_version}" +
+                          (f" --loader {loader}" if loader else ""))
+            print()
+            if required_missing:
+                log.warn(f"{len(required_missing)} required dependency(ies) missing. "
+                         f"Install them first, or the mod may not load.")
+            print()
+
+    def _resolve_mod(self, slug, mc_version, loader):
+        project = self.modrinth.get_project(slug)
+        versions = self.modrinth.get_versions(project["id"], loader=loader,
+                                              game_version=mc_version)
+        if versions:
+            return project, versions
+
+        proj_title = project.get("title", slug)
+        extra = f" for MC {mc_version}"
+        extra += f" ({loader})" if loader else ""
+        log.error(f"No versions found for {proj_title}{extra}")
+        support = self.loader_support(project["id"])
+        if support:
+            print(f"\n  Available support for '{proj_title}':")
+            print(f"    {self.format_loader_support(support)}")
+            others = {l: s for l, s in support.items() if l not in self.LOADERS_SHOWN}
+            for l, (mc, modver) in sorted(others.items()):
+                print(f"    {l} <= MC {mc} ({modver})")
+            print()
+        if not loader:
+            print("  Hint: install a loader first, or specify --loader manually")
+        sys.exit(1)
 
     def list_mods(self, mc_version):
         mods_dir = self._mods_dir(mc_version)
@@ -567,21 +1049,36 @@ def find_free_port():
         s.bind(("127.0.0.1", 0))
         return s.getsockname()[1]
 
-def check_java():
-    java = None
+def _java_major(java_path):
+    try:
+        out = subprocess.check_output([str(java_path), "-version"],
+                                      stderr=subprocess.STDOUT, text=True, timeout=15)
+        m = re.search(r'version "(\d+)(?:\.(\d+))?', out)
+        if not m:
+            return None
+        major = int(m.group(1))
+        if major == 1 and m.group(2):
+            major = int(m.group(2))
+        return major
+    except Exception:
+        return None
+
+def _find_java_candidates():
     candidates = []
+    java_bin = "java.exe" if platform.system() == "Windows" else "java"
 
     jh = os.environ.get("JAVA_HOME", "")
     if jh:
-        java_bin = "java.exe" if platform.system() == "Windows" else "java"
         je = Path(jh) / "bin" / java_bin
         if je.exists():
-            java = str(je)
+            candidates.append(str(je))
 
-    if not java:
-        java = shutil.which("java")
+    w = shutil.which("java")
+    if w:
+        candidates.append(w)
 
-    if not java and platform.system() == "Windows":
+    scanned = []
+    if platform.system() == "Windows":
         import winreg
         reg_roots = [
             (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Eclipse Adoptium\JDK"),
@@ -601,40 +1098,35 @@ def check_java():
                                 jh_reg, _ = winreg.QueryValueEx(sk, "Path")
                                 je = Path(jh_reg) / "bin" / "java.exe"
                                 if je.exists():
-                                    candidates.append(str(je))
+                                    scanned.append(str(je))
                             i += 1
                         except OSError:
                             break
             except OSError:
                 continue
 
-    if not java and platform.system() == "Windows":
         user_home = Path(os.environ.get("USERPROFILE", Path.home()))
         for d in sorted(user_home.glob("jdk-*"), reverse=True):
             je = d / "bin" / "java.exe"
             if je.exists():
-                candidates.append(str(je))
+                scanned.append(str(je))
 
-    if not java and platform.system() == "Windows":
         for base in [r"C:\Program Files\Java", r"C:\Program Files\Eclipse Adoptium",
                      r"C:\Program Files\Microsoft", r"C:\Program Files\Eclipse Foundation",
                      r"C:\Program Files (x86)\Java"]:
             bp = Path(base)
             if bp.exists():
-
                 for d in bp.glob("*"):
                     if d.is_dir():
                         je = d / "bin" / "java.exe"
-                        if je.exists() and str(je) not in candidates:
-                            candidates.append(str(je))
-
+                        if je.exists() and str(je) not in scanned:
+                            scanned.append(str(je))
                         for sd in d.glob("*"):
                             if sd.is_dir():
                                 je2 = sd / "bin" / "java.exe"
-                                if je2.exists() and str(je2) not in candidates:
-                                    candidates.append(str(je2))
-
-    if not java and platform.system() != "Windows":
+                                if je2.exists() and str(je2) not in scanned:
+                                    scanned.append(str(je2))
+    else:
         for base in ["/usr/lib/jvm", "/usr/local/opt", Path.home() / ".sdkman/candidates/java",
                      Path.home() / ".jdks"]:
             bp = Path(base)
@@ -642,35 +1134,172 @@ def check_java():
                 for d in sorted(bp.glob("*"), reverse=True):
                     je = d / "bin" / "java"
                     if je.exists():
-                        candidates.append(str(je))
+                        scanned.append(str(je))
 
         hb = Path("/usr/local/opt/openjdk/bin/java")
         if hb.exists():
-            candidates.append(str(hb))
+            scanned.append(str(hb))
 
-    if not java and candidates:
+    def _key(p):
+        nums = re.findall(r'(\d+)', p)
+        return tuple(int(n) for n in nums) if nums else (0,)
+    scanned.sort(key=_key, reverse=True)
 
-        def _key(p):
-            nums = re.findall(r'(\d+)', p)
-            return tuple(int(n) for n in nums) if nums else (0,)
-        candidates.sort(key=_key, reverse=True)
-        java = candidates[0]
+    seen = set()
+    result = []
+    for c in candidates + scanned:
+        try:
+            key = str(Path(c).resolve())
+        except OSError:
+            key = c
+        if key not in seen:
+            seen.add(key)
+            result.append(c)
+    return result
 
-    if not java:
+def check_java(required_major=None):
+    candidates = _find_java_candidates()
+
+    if required_major:
+        for c in candidates:
+            if _java_major(c) == required_major:
+                return c
+        return None
+
+    if not candidates:
         log.die("Java not found. Install Java 17+ from https://adoptium.net/",
                 hint='If you already installed Java, set JAVA_HOME:\n         PowerShell: $env:JAVA_HOME = "C:\\path\\to\\jdk"')
 
-    try:
-        out = subprocess.check_output([java, "-version"], stderr=subprocess.STDOUT, text=True)
-        m = re.search(r'version "(\d+)', out)
-        if m:
-            ver = int(m.group(1))
-            if ver < 17:
-                log.warn(f"Java {ver} detected. Minecraft 1.18+ needs Java 17+.")
-                print(f"  Found at: {java}")
-    except Exception:
-        pass
+    java = candidates[0]
+    ver = _java_major(java)
+    if ver and ver < 17:
+        log.warn(f"Java {ver} detected. Minecraft 1.18+ needs Java 17+.")
+        print(f"  Found at: {java}")
     return java
+
+MOJANG_JAVA_MANIFEST = ("https://launchermeta.mojang.com/v1/products/java-runtime/"
+                        "2ec0cc96c44e5a76b9c8b7c39df7210883d12871/all.json")
+
+def _mojang_java_platform():
+    osn = os_name()
+    arch = os_arch()
+    if osn == "windows":
+        return "windows-arm64" if arch == "arm64" else "windows-x64"
+    if osn == "osx":
+        return "mac-os-arm64" if arch == "arm64" else "mac-os"
+    if osn == "linux" and arch == "x86_64":
+        return "linux"
+    return None
+
+def download_mojang_java(game_dir: Path, component: str, max_workers=4):
+    """Download Mojang's bundled Java runtime (same as the official launcher).
+    Returns path to the java executable, or None on failure."""
+    dest_root = game_dir / "java" / component
+    exe_name = "java.exe" if platform.system() == "Windows" else "java"
+
+    existing = sorted(dest_root.glob(f"**/bin/{exe_name}"))
+    if existing:
+        return str(existing[0])
+
+    plat = _mojang_java_platform()
+    if not plat:
+        log.warn(f"No Mojang Java runtime available for {os_name()}/{os_arch()}.")
+        return None
+
+    try:
+        status, body = _http_get(MOJANG_JAVA_MANIFEST)
+        if status != 200:
+            log.warn(f"Mojang Java runtime index fetch failed ({status})")
+            return None
+        entries = json.loads(body).get(plat, {}).get(component, [])
+        if not entries:
+            log.warn(f"Mojang has no Java runtime '{component}' for platform '{plat}'.")
+            return None
+        ver_name = entries[0].get("version", {}).get("name", "?")
+        status, body = _http_get(entries[0]["manifest"]["url"])
+        if status != 200:
+            log.warn(f"Mojang Java runtime manifest fetch failed ({status})")
+            return None
+        files = json.loads(body).get("files", {})
+    except Exception as e:
+        log.warn(f"Mojang Java runtime metadata error: {e}")
+        return None
+
+    downloads = []
+    links = []
+    executables = []
+    for rel, info in sorted(files.items()):
+        target = dest_root / rel
+        ftype = info.get("type")
+        if ftype == "directory":
+            target.mkdir(parents=True, exist_ok=True)
+        elif ftype == "file":
+            raw = info.get("downloads", {}).get("raw")
+            if not raw:
+                continue
+            if not (target.exists() and raw.get("sha1")
+                    and _sha1_file(target) == raw["sha1"]):
+                downloads.append((raw["url"], target, raw.get("sha1")))
+            if info.get("executable"):
+                executables.append(target)
+        elif ftype == "link" and info.get("target"):
+            links.append((target, info["target"]))
+
+    log.info(f"Downloading Java runtime {ver_name} ({component}): "
+             f"{len(downloads)} files [{max_workers} threads]...")
+
+    fail = [0]
+    done = [0]
+    lock = threading.Lock()
+
+    def _fetch(url, dest, sha1):
+        try:
+            _download_file(url, dest, "", sha1=sha1, show_progress=False)
+            return True
+        except Exception:
+            return False
+
+    if downloads:
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            futures = {pool.submit(_fetch, u, d, s): d for u, d, s in downloads}
+            for f in as_completed(futures):
+                with lock:
+                    if f.result():
+                        done[0] += 1
+                    else:
+                        fail[0] += 1
+                    n = done[0] + fail[0]
+                    pct = n * 100 // len(downloads)
+                    filled = pct * 25 // 100
+                    bar = "\u2588" * filled + "\u2591" * (25 - filled)
+                    print(f"\r  [{pct:3d}%] {bar} {n}/{len(downloads)} files",
+                          end="", flush=True)
+        print()
+
+    if fail[0]:
+        log.warn(f"{fail[0]} Java runtime file(s) failed to download.")
+        return None
+
+    if platform.system() != "Windows":
+        for t in executables:
+            try:
+                t.chmod(t.stat().st_mode | 0o755)
+            except OSError:
+                pass
+        for target, link_target in links:
+            try:
+                if not target.exists() and not target.is_symlink():
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    os.symlink(link_target, target)
+            except OSError:
+                pass
+
+    java_bins = sorted(dest_root.glob(f"**/bin/{exe_name}"))
+    if not java_bins:
+        log.warn("Java runtime downloaded but java executable not found.")
+        return None
+    log.success(f"Java runtime {ver_name} installed -> {dest_root}")
+    return str(java_bins[0])
 
 def os_name():
     p = platform.system().lower()
@@ -756,9 +1385,13 @@ class MicrosoftAuth:
         params = {
             "client_id": MS_CLIENT_ID,
             "response_type": "code",
-            "scope": "XboxLive.signin offline_access",
+            "scope": MS_SCOPE,
             "redirect_uri": MS_REDIRECT,
             "prompt": "select_account",
+            "lw": "1",
+            "fl": "dob,easi2",
+            "xsup": "1",
+            "nopa": "2",
         }
         auth_url = f"{MS_AUTH_URL}?{urlencode(params)}"
 
@@ -796,6 +1429,7 @@ class MicrosoftAuth:
             "code": auth_code,
             "grant_type": "authorization_code",
             "redirect_uri": MS_REDIRECT,
+            "scope": MS_SCOPE,
         }))
         if status != 200:
             log.die(f"Token exchange failed ({status})", 
@@ -820,7 +1454,7 @@ class MicrosoftAuth:
 """)
         status, body = _http_post(MS_DEVICE_AUTH, data=urlencode({
             "client_id": MS_CLIENT_ID,
-            "scope": "XboxLive.signin offline_access",
+            "scope": MS_SCOPE,
         }))
         if status != 200:
             log.die(f"Device code request failed ({status})", 
@@ -880,17 +1514,22 @@ class MicrosoftAuth:
 
     def do_full_auth_chain(self, ms_access_token):
 
-        status, body = _http_post(XBL_AUTH_URL, json_data={
-            "Properties": {
-                "AuthMethod": "RPS",
-                "SiteName": "user.auth.xboxlive.com",
-                "RpsTicket": f"d={ms_access_token}",
-            },
-            "RelyingParty": "http://auth.xboxlive.com",
-            "TokenType": "JWT",
-        })
+        # Xbox Live RPS sometimes requires the "d=" prefix and sometimes rejects it.
+        # Try both variants before giving up.
+        for ticket in (ms_access_token, f"d={ms_access_token}"):
+            status, body = _http_post(XBL_AUTH_URL, json_data={
+                "Properties": {
+                    "AuthMethod": "RPS",
+                    "SiteName": "user.auth.xboxlive.com",
+                    "RpsTicket": ticket,
+                },
+                "RelyingParty": "http://auth.xboxlive.com",
+                "TokenType": "JWT",
+            })
+            if status == 200:
+                break
         if status != 200:
-            log.die(f"Xbox Live auth failed ({status})", 
+            log.die(f"Xbox Live auth failed ({status})",
                     hint=body.decode(errors="replace")[:300])
         xbl = json.loads(body)
         xbl_token = xbl["Token"]
@@ -942,7 +1581,7 @@ class MicrosoftAuth:
             "client_id": MS_CLIENT_ID,
             "refresh_token": refresh_token,
             "grant_type": "refresh_token",
-            "scope": "XboxLive.signin offline_access",
+            "scope": MS_SCOPE,
         }))
         if status != 200:
             log.warn(f"Microsoft token refresh failed ({status})")
@@ -1291,8 +1930,66 @@ class MinecraftLauncher:
             self._java = check_java()
         return self._java
 
+    def _select_java(self, version_data):
+        """Pick a Java matching the version's required major (e.g. 21 for 1.21.x).
+        Forge/NeoForge toolchains (Mixin/ASM) break on newer Java, so an exact
+        major match is preferred; falls back to Mojang's bundled runtime."""
+        jv = version_data.get("javaVersion", {}) or {}
+        required = jv.get("majorVersion")
+        component = jv.get("component", "java-runtime-gamma")
+
+        if self._java is not None:
+            major = _java_major(self._java)
+            if required and major and major != required:
+                log.warn(f"Specified Java is version {major}, but Minecraft "
+                         f"{version_data.get('id', '?')} expects Java {required}. "
+                         f"Mods (Forge/NeoForge) may crash.")
+            return self._java
+
+        if not required:
+            return self.java
+
+        java = check_java(required_major=required)
+        if java:
+            self._java = java
+            return java
+
+        exe_name = "java.exe" if platform.system() == "Windows" else "java"
+        cached = sorted((self.game_dir / "java" / component).glob(f"**/bin/{exe_name}"))
+        if cached:
+            self._java = str(cached[0])
+            return self._java
+
+        log.info(f"No local Java {required} found; fetching Mojang Java runtime...")
+        java = download_mojang_java(self.game_dir, component, self.threads)
+        if java:
+            self._java = java
+            return java
+
+        log.warn(f"Could not get Java {required}; falling back to system Java. "
+                 f"Modded launches may crash (e.g. Mixin errors on newer Java).")
+        return self.java
+
+    def _load_loader_profile(self, mc_version, loader=None, use_fabric=False):
+        if loader is None and use_fabric:
+            loader = "fabric"
+        if loader:
+            path = self.game_dir / "libraries" / loader / f"{loader}-profile-{mc_version}.json"
+            if path.exists():
+                return loader, json.loads(path.read_text(encoding="utf-8"))
+            install_cmd = ("install-fabric" if loader == "fabric"
+                           else f"install-{loader}")
+            log.die(f"--{loader} requested but no {loader} profile found for {mc_version}.",
+                    hint=f"Install it first: python mc_launcher.py {install_cmd} -v {mc_version}")
+
+        for candidate in ("fabric", "neoforge", "forge"):
+            path = self.game_dir / "libraries" / candidate / f"{candidate}-profile-{mc_version}.json"
+            if path.exists():
+                return candidate, json.loads(path.read_text(encoding="utf-8"))
+        return None, None
+
     def launch(self, version_id=None, account_data=None, ram_mb=4096,
-               use_fabric=False, width=None, height=None):
+               loader=None, use_fabric=False, width=None, height=None):
         if account_data is None:
             account_data = self.accounts.get_default()
         if account_data is None:
@@ -1322,17 +2019,22 @@ class MinecraftLauncher:
             access_token = "0"
 
         version_id, version_data = self.versions.get_version_info(version_id)
+        mc_version = version_id
 
-        version_game_dir = self.game_dir / "versions" / version_id
+        version_game_dir = self.game_dir / "versions" / mc_version
         version_game_dir.mkdir(parents=True, exist_ok=True)
 
-        log.header(f"Minecraft {version_id} | {username} ({acc_type})")
+        loader, loader_profile = self._load_loader_profile(mc_version, loader, use_fabric)
+        if loader:
+            log.header(f"Minecraft {mc_version} ({loader.title()}) | {username} ({acc_type})")
+        else:
+            log.header(f"Minecraft {mc_version} | {username} ({acc_type})")
         log.info(f"Game dir: {version_game_dir}\n")
 
         log.step(1, 4, "Downloading client jar...")
-        client_jar = self.versions.download_client_jar(version_id, version_data)
+        client_jar = self.versions.download_client_jar(mc_version, version_data)
 
-        natives_dir = self.game_dir / "natives" / version_id
+        natives_dir = self.game_dir / "natives" / mc_version
         natives_dir.mkdir(parents=True, exist_ok=True)
 
         log.step(2, 4, "Downloading libraries...")
@@ -1347,38 +2049,68 @@ class MinecraftLauncher:
 
         extra_cp = []
 
-        fabric_profile = None
-        fabric_profile_path = (self.game_dir / "libraries" / "fabric"
-                               / f"fabric-profile-{version_id}.json")
-        if fabric_profile_path.exists():
-            fabric_profile = json.loads(fabric_profile_path.read_text(encoding="utf-8"))
-        elif use_fabric:
-            log.warn("--fabric set but no Fabric profile found.")
-            log.warn(f"Run: python mc_launcher.py install-fabric -v {version_id}")
-
-        if fabric_profile:
-            use_fabric = True
-            for lib in fabric_profile.get("libraries", []):
+        if loader_profile:
+            loader_label = loader.title()
+            for lib in loader_profile.get("libraries", []):
+                if "rules" in lib and not self.versions._rules_allow(lib["rules"], default=True):
+                    continue
                 name = lib["name"]
-                rel_path = FabricManager._maven_path(name)
+                rel_path = None
+                if "downloads" in lib and "artifact" in lib["downloads"]:
+                    rel_path = lib["downloads"]["artifact"].get("path")
+                if not rel_path:
+                    rel_path = _maven_rel_path(name)
                 lib_jar = self.game_dir / "libraries" / rel_path
+                if not lib_jar.exists():
+                    url = None
+                    if "downloads" in lib and "artifact" in lib["downloads"]:
+                        url = lib["downloads"]["artifact"].get("url")
+                    elif lib.get("url"):
+                        url = f"{lib['url'].rstrip('/')}/{rel_path}"
+                    if url:
+                        try:
+                            _download_file(url, lib_jar, lib_jar.name, show_progress=False)
+                        except Exception as e:
+                            log.warn(f"Could not download loader library {lib_jar.name}: {e}")
                 if lib_jar.exists():
                     extra_cp.append(str(lib_jar))
-            print(f"  Fabric:  {len(extra_cp)} lib jars")
+                else:
+                    log.warn(f"Loader library missing: {lib_jar}")
+            print(f"  {loader_label}:  {len(extra_cp)} lib jars")
 
-        if use_fabric:
-            mods_dir = ModManager(self.game_dir)._mods_dir(version_id)
+            mods_dir = ModManager(self.game_dir)._mods_dir(mc_version)
             mod_jars = sorted(f for f in mods_dir.iterdir()
-                              if f.name.endswith(".jar") and not f.name.endswith(".disabled"))
+                              if f.name.endswith(".jar")
+                              and not f.name.endswith(".disabled")
+                              and not f.name.endswith("-sources.jar")
+                              and not f.name.endswith("-javadoc.jar"))
             if mod_jars:
-                extra_cp.extend(str(p) for p in mod_jars)
+                # Forge/NeoForge (BootstrapLauncher) must NOT have mod jars on the
+                # classpath: they would be turned into boot-layer modules and FML
+                # would then skip them when scanning the mods folder. Both loaders
+                # discover mods from <gameDir>/mods on their own.
+                if loader == "fabric":
+                    extra_cp.extend(str(p) for p in mod_jars)
                 print(f"  Mods:    {len(mod_jars)} jar(s)")
 
         all_cp = [client_jar] + lib_jars + extra_cp
+
+        seen = set()
+        deduped_cp = []
+        for p in all_cp:
+            key = str(p)
+            if key not in seen:
+                seen.add(key)
+                deduped_cp.append(p)
+        if len(deduped_cp) < len(all_cp):
+            log.debug(f"Removed {len(all_cp) - len(deduped_cp)} duplicate classpath entry(ies)")
+        all_cp = deduped_cp
         classpath = sep.join(str(p) for p in all_cp)
 
-        if fabric_profile:
-            main_class = fabric_profile.get("mainClass", "net.fabricmc.loader.impl.launch.knot.KnotClient")
+        if loader_profile:
+            main_class = loader_profile.get("mainClass")
+            if not main_class:
+                log.die(f"Loader profile for {loader} has no mainClass.")
         else:
             main_class = version_data.get("mainClass", "net.minecraft.client.main.Main")
 
@@ -1406,9 +2138,16 @@ class MinecraftLauncher:
         if not any("natives" in a.lower() for a in jvm_args):
             jvm_args.append(f"-Djava.library.path={natives_dir}")
 
-        if fabric_profile:
-            for arg in fabric_profile.get("arguments", {}).get("jvm", []):
-                jvm_args.append(arg)
+        if loader_profile:
+            for arg in loader_profile.get("arguments", {}).get("jvm", []):
+                if isinstance(arg, str):
+                    jvm_args.append(arg)
+                elif isinstance(arg, dict) and self.versions._rules_allow(arg.get("rules", [])):
+                    val = arg.get("value")
+                    if isinstance(val, list):
+                        jvm_args.extend(val)
+                    elif isinstance(val, str):
+                        jvm_args.append(val)
 
         game_args = []
         if "arguments" in version_data:
@@ -1423,6 +2162,17 @@ class MinecraftLauncher:
                         game_args.append(val)
         elif "minecraftArguments" in version_data:
             game_args = version_data["minecraftArguments"].split(" ")
+
+        if loader_profile:
+            for arg in loader_profile.get("arguments", {}).get("game", []):
+                if isinstance(arg, str):
+                    game_args.append(arg)
+                elif isinstance(arg, dict) and self.versions._rules_allow(arg.get("rules", [])):
+                    val = arg.get("value")
+                    if isinstance(val, list):
+                        game_args.extend(val)
+                    elif isinstance(val, str):
+                        game_args.append(val)
 
         replacements = {
             "${auth_player_name}":  username,
@@ -1464,9 +2214,11 @@ class MinecraftLauncher:
         if not any("-cp" in a or "-classpath" in a for a in jvm_args):
             jvm_args = jvm_args + ["-cp", classpath]
 
-        cmd = [self.java] + jvm_args + [main_class] + game_args
+        java = self._select_java(version_data)
+        java_ver = _java_major(java)
+        cmd = [java] + jvm_args + [main_class] + game_args
 
-        log.info(f"Java:    {self.java}")
+        log.info(f"Java:    {java}" + (f" (Java {java_ver})" if java_ver else ""))
         log.info(f"Version: {version_id}")
         log.info(f"Player:  {username}")
         log.info(f"RAM:     {ram_mb} MB")
@@ -1535,9 +2287,10 @@ class MinecraftLauncher:
             print(f"    Then launch:")
             print(f"      python mc_launcher.py launch -v {version_id}")
 
-        fabric_path = self.game_dir / "libraries" / "fabric" / f"fabric-profile-{version_id}.json"
-        if fabric_path.exists():
-            print(f"    Fabric:  detected — add --fabric to launch command")
+        for loader in ("fabric", "forge", "neoforge"):
+            p = self.game_dir / "libraries" / loader / f"{loader}-profile-{version_id}.json"
+            if p.exists():
+                print(f"    {loader.title()}:  detected — add --{loader} to launch command")
         return version_id, version_data
 
     @property
@@ -1561,15 +2314,17 @@ def _parse_ram(value):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Simple Minecraft CLI Launcher — Microsoft + offline + Modrinth mods",
+        description="Simple Minecraft CLI Launcher — Microsoft + offline + Fabric/Forge/NeoForge + Modrinth mods",
         epilog="Examples:\n"
-               "  %(prog)s login                       # Microsoft login (device code, recommended)\n"
-               "  %(prog)s login --browser              # Browser login (copy-paste URL)\n"
+               "  %(prog)s login                       # Microsoft login (browser, default)\n"
+               "  %(prog)s login --device-code         # Device code login (requires custom Azure app)\n"
                "  %(prog)s offline Steve               # Offline mode (save credentials)\n"
                "  %(prog)s play                        # Launch with saved account + version\n"
                "  %(prog)s play -v 1.21.4              # Launch specific version\n"
                "  %(prog)s play -v 1.21.4 --ram 4G     # Allocate 4 GB RAM\n"
                "  %(prog)s play --fabric                # Launch with Fabric + mods\n"
+               "  %(prog)s play --forge                 # Launch with Forge + mods\n"
+               "  %(prog)s play --neoforge              # Launch with NeoForge + mods\n"
                "  %(prog)s accounts                    # Show saved accounts\n"
                "  %(prog)s download                    # Download latest version only\n"
                "  %(prog)s download -v 1.20.1 --no-assets  # Jar+libs only\n"
@@ -1577,7 +2332,10 @@ def main():
                "  %(prog)s list-versions               # List all Minecraft versions\n"
                "  %(prog)s list-loaders                # List all mod loaders\n"
                "  %(prog)s search sodium               # Search mods on Modrinth\n"
+               "  %(prog)s search-more sodium          # Detailed info (exact slug required)\n"
                "  %(prog)s install-fabric -v 1.21.4    # Install Fabric loader\n"
+               "  %(prog)s install-forge -v 1.20.1     # Install Forge loader\n"
+               "  %(prog)s install-neoforge -v 1.21.4  # Install NeoForge loader\n"
                "  %(prog)s install-mod sodium -v 1.21.4     # Install a mod\n"
                "  %(prog)s list-installed              # List locally installed versions\n"
                "  %(prog)s list-mods -v 1.21.4         # List mods for a version\n"
@@ -1591,8 +2349,9 @@ def main():
                         choices=["login", "offline", "play", "launch", "download",
                                  "logout", "accounts",
                                  "list-versions", "list-loaders", "list-installed",
-                                 "list-mods", "search",
-                                 "install-fabric", "install-mod",
+                                 "list-mods", "search", "search-more",
+                                 "install-fabric", "install-forge", "install-neoforge",
+                                 "install-mod",
                                  "disable-mod", "enable-mod", "uninstall-mod"],
                         help="Action to perform ('play' and 'launch' are equivalent)")
     parser.add_argument("query", nargs="?", default=None,
@@ -1600,7 +2359,7 @@ def main():
     parser.add_argument("--version", "-v", default=None,
                         help="Minecraft version (default: latest release)")
     parser.add_argument("--loader", "-l", default=None,
-                        help="Mod loader filter (fabric, forge, quilt, etc.)")
+                        help="Mod loader filter (fabric, forge, neoforge, quilt, etc.)")
     parser.add_argument("--loader-version", default=None,
                         help="Specific loader version ID to install")
     parser.add_argument("--mod-version", default=None,
@@ -1623,8 +2382,14 @@ def main():
                         help="Parallel download threads (default: 4, max: 32)")
     parser.add_argument("--fabric", action="store_true",
                         help="Launch with Fabric loader (auto-detected if installed)")
+    parser.add_argument("--forge", action="store_true",
+                        help="Launch with Forge loader (auto-detected if installed)")
+    parser.add_argument("--neoforge", action="store_true",
+                        help="Launch with NeoForge loader (auto-detected if installed)")
     parser.add_argument("--browser", action="store_true",
-                        help="Use browser login instead of device code (requires URL copy-paste)")
+                        help="Use browser login (default; requires URL copy-paste)")
+    parser.add_argument("--device-code", action="store_true",
+                        help="Use Microsoft device code login (requires a custom Azure app)")
 
     args = parser.parse_args()
     game_dir = Path(args.dir)
@@ -1632,6 +2397,16 @@ def main():
     # Normalize aliases
     if args.action == "launch":
         args.action = "play"
+
+    if args.forge and args.neoforge:
+        log.die("Cannot use both --forge and --neoforge.")
+    if not args.loader:
+        if args.forge:
+            args.loader = "forge"
+        elif args.neoforge:
+            args.loader = "neoforge"
+        elif args.fabric:
+            args.loader = "fabric"
 
     launcher = MinecraftLauncher(game_dir, threads=args.threads)
 
@@ -1680,11 +2455,15 @@ def main():
         return
 
     if args.action == "list-loaders":
-        log.header("Mod Loaders (from Modrinth)")
+        log.header("Mod Loaders")
         loaders = ModrinthAPI.list_loaders()
+        print("  Modrinth loaders:")
         for l in loaders:
             print(f"  - {l}")
-        log.info(f"\nTotal: {len(loaders)} loaders")
+        print("  Built-in loaders:")
+        for l in ("fabric", "forge", "neoforge", "quilt"):
+            print(f"  - {l}")
+        log.info(f"\nTotal: {len(loaders)} loaders from Modrinth + built-in loaders")
         return
 
     if args.action == "list-installed":
@@ -1702,10 +2481,10 @@ def main():
                 jar_size = f"  ({jar.stat().st_size / 1024 / 1024:.1f} MB)"
             mod_count = len(list((vdir / "mods").glob("*.jar"))) if (vdir / "mods").exists() else 0
             dis_count = len(list((vdir / "mods").glob("*.jar.disabled"))) if (vdir / "mods").exists() else 0
-            fabric_ok = (game_dir / "libraries" / "fabric" / f"fabric-profile-{v}.json").exists()
             tags = []
-            if fabric_ok:
-                tags.append("Fabric")
+            for loader in ("fabric", "forge", "neoforge"):
+                if (game_dir / "libraries" / loader / f"{loader}-profile-{v}.json").exists():
+                    tags.append(loader.title())
             if mod_count:
                 tags.append(f"{mod_count} mods")
             if dis_count:
@@ -1805,37 +2584,128 @@ def main():
         query = args.query
         if not query:
             log.die("Please provide a search query.\n  Example: python mc_launcher.py search sodium")
-        log.header(f"Searching Modrinth for: {query}")
-        hits = ModManager(game_dir).search(query, limit=args.limit)
+        log.header(f"Searching for: {query} (source: modrinth)")
+        mm = ModManager(game_dir)
+        hits = mm.search(query, limit=args.limit,
+                         game_version=args.version, loader=args.loader)
         if not hits:
             log.warn("No results found.")
             return
+
+        support_map = {}
+        with ThreadPoolExecutor(max_workers=min(8, len(hits))) as pool:
+            futures = {pool.submit(mm.loader_support, h["project_id"]): h["project_id"]
+                       for h in hits if h.get("project_id")}
+            for f in as_completed(futures):
+                try:
+                    support_map[futures[f]] = f.result()
+                except Exception:
+                    support_map[futures[f]] = {}
+
         for i, h in enumerate(hits):
             title = h.get("title", h.get("slug", "?"))
             desc = h.get("description", "")[:100]
             author = h.get("author", "?")
             downloads = h.get("downloads", 0)
             categories = ", ".join(h.get("categories", []))
+            source = h.get("source", "?")
             print(f"  [{i+1}] {title}")
-            print(f"      slug: {h.get('slug', '?')}")
+            print(f"      slug: {h.get('slug', '?')}  |  source: {source}")
             print(f"      by: {author}  |  downloads: {downloads:,}")
             print(f"      categories: {categories}")
+            support = support_map.get(h.get("project_id"), {})
+            if support:
+                print(f"      support: {ModManager.format_loader_support(support)}")
             if desc:
                 print(f"      {desc}...")
             print()
         log.info(f"Found {len(hits)} result(s).")
         log.info("Install with: python mc_launcher.py install-mod <slug> -v <version>")
+        log.info("Details with: python mc_launcher.py search-more <slug>")
         return
 
-    if args.action == "install-fabric":
-        mc_version = args.version
-        if not mc_version:
-            mc_version = "latest"
+    if args.action == "search-more":
+        slug = args.query
+        if not slug:
+            log.die("Please provide the exact mod slug.\n  Example: python mc_launcher.py search-more sodium")
+        mm = ModManager(game_dir)
+        try:
+            project = mm.modrinth.get_project(slug)
+        except SystemExit:
+            log.die(f"Project '{slug}' not found. search-more requires the EXACT slug.",
+                    hint=f"Find the slug first: python mc_launcher.py search {slug}")
 
-            manifest = VersionManager(game_dir).fetch_manifest()
+        versions = mm.modrinth.get_versions(project["id"])
+        support = ModManager.summarize_loader_support(versions)
+
+        title = project.get("title", slug)
+        log.header(f"{title}")
+        print(f"  slug:        {project.get('slug', '?')}")
+        print(f"  project id:  {project.get('id', '?')}")
+        print(f"  downloads:   {project.get('downloads', 0):,}")
+        print(f"  followers:   {project.get('followers', 0):,}")
+        print(f"  client/server: {project.get('client_side', '?')} / {project.get('server_side', '?')}")
+        lic = project.get("license") or {}
+        print(f"  license:     {lic.get('id', '?')}")
+        print(f"  categories:  {', '.join(project.get('categories', []))}")
+        print(f"  updated:     {project.get('updated', '?')[:10]}")
+        if project.get("source_url"):
+            print(f"  source:      {project['source_url']}")
+        if project.get("issues_url"):
+            print(f"  issues:      {project['issues_url']}")
+        desc = project.get("description", "")
+        if desc:
+            print(f"\n  {desc}")
+
+        print(f"\n  Loader support (highest game version):")
+        for l in ModManager.LOADERS_SHOWN:
+            if l in support:
+                mc, modver = support[l]
+                print(f"    {l:<10s} <= MC {mc:<10s} latest mod version: {modver}")
+            else:
+                print(f"    {l:<10s} not supported")
+        for l, (mc, modver) in sorted(support.items()):
+            if l not in ModManager.LOADERS_SHOWN:
+                print(f"    {l:<10s} <= MC {mc:<10s} latest mod version: {modver}")
+
+        all_mc = {g for v in versions for g in v.get("game_versions", [])
+                  if ModManager._RELEASE_MC_RE.match(g)}
+        if all_mc:
+            mc_sorted = sorted(all_mc, key=ModManager._mc_key)
+            shown = ", ".join(mc_sorted[-12:])
+            prefix = "..., " if len(mc_sorted) > 12 else ""
+            print(f"\n  Supported MC releases: {prefix}{shown}")
+
+        versions_sorted = sorted(versions, key=lambda v: v.get("date_published", ""),
+                                 reverse=True)
+        print(f"\n  Recent versions ({min(8, len(versions_sorted))} of {len(versions_sorted)}):")
+        for v in versions_sorted[:8]:
+            vn = v.get("version_number", v.get("id", "?"))
+            gv = ", ".join(v.get("game_versions", ["?"])[-4:])
+            ld = ", ".join(v.get("loaders", ["?"]))
+            date = v.get("date_published", "?")[:10]
+            vtype = v.get("version_type", "?")
+            print(f"    {vn:<36s} {vtype:<8s} MC {gv:<24s} [{ld}]  {date}")
+        print(f"\n  Install: python mc_launcher.py install-mod {project.get('slug', slug)} -v <version> --loader <loader>")
+        return
+
+    if args.action in ("install-fabric", "install-forge", "install-neoforge"):
+        mc_version = args.version
+        vm = VersionManager(game_dir)
+        if not mc_version:
+            manifest = vm.fetch_manifest()
             mc_version = manifest["latest"]["release"]
             log.info(f"Using latest Minecraft release: {mc_version}")
+        else:
+            manifest = vm.fetch_manifest()
+            known = {v["id"] for v in manifest.get("versions", [])}
+            if mc_version not in known:
+                close = [v for v in known if v.startswith(mc_version[:4])]
+                close.sort()
+                hint = f"Did you mean: {', '.join(close[-8:])}" if close else ""
+                log.die(f"Minecraft version '{mc_version}' does not exist.", hint=hint)
 
+    if args.action == "install-fabric":
         log.header("Install Fabric Loader")
         log.info(f"Target MC version: {mc_version}")
 
@@ -1847,6 +2717,34 @@ def main():
         print(f"    Profile:    {profile.get('id', '?')}")
         print(f"    Libraries:  {len(all_jars)} jars -> {game_dir / 'libraries'}")
         print(f"\n  Launch with: python mc_launcher.py launch -v {mc_version} --fabric")
+        return
+
+    if args.action == "install-forge":
+        log.header("Install Forge Loader")
+        log.info(f"Target MC version: {mc_version}")
+
+        fm = ForgeManager(game_dir)
+        installed_id, profile = fm.install(mc_version, args.loader_version)
+
+        log.success("Forge Loader installed successfully!")
+        print(f"    MC Version: {mc_version}")
+        print(f"    Version ID: {installed_id}")
+        print(f"    Main Class: {profile.get('mainClass', '?')}")
+        print(f"\n  Launch with: python mc_launcher.py launch -v {mc_version} --forge")
+        return
+
+    if args.action == "install-neoforge":
+        log.header("Install NeoForge Loader")
+        log.info(f"Target MC version: {mc_version}")
+
+        nm = NeoForgeManager(game_dir)
+        installed_id, profile = nm.install(mc_version, args.loader_version)
+
+        log.success("NeoForge Loader installed successfully!")
+        print(f"    MC Version: {mc_version}")
+        print(f"    Version ID: {installed_id}")
+        print(f"    Main Class: {profile.get('mainClass', '?')}")
+        print(f"\n  Launch with: python mc_launcher.py launch -v {mc_version} --neoforge")
         return
 
     if args.action == "install-mod":
@@ -1871,26 +2769,27 @@ def main():
         )
 
         title = project.get("title", slug)
-        log.success(f"{title} installed for Minecraft {mc_version}!")
-        fabric = (game_dir / "libraries" / "fabric" / f"fabric-profile-{mc_version}.json").exists()
-        if fabric:
-            print(f"  Launch with: python mc_launcher.py launch -v {mc_version} --fabric")
+        source = project.get("source", "?")
+        log.success(f"{title} installed for Minecraft {mc_version} (source: {source})!")
+        used_loader = mm._pick_loader(mc_version, args.loader)
+        if used_loader:
+            print(f"  Launch with: python mc_launcher.py launch -v {mc_version} --{used_loader}")
         else:
-            print(f"  Install Fabric first: python mc_launcher.py install-fabric -v {mc_version}")
+            print(f"  Install a loader first, e.g.: python mc_launcher.py install-fabric -v {mc_version}")
             print(f"  Then launch: python mc_launcher.py launch -v {mc_version} --fabric")
         return
 
     if args.action == "login":
-        if args.browser:
+        if args.device_code:
+            auth = MicrosoftAuth()
+            auth.device_code_login()
+        else:
             log.header("Microsoft Login (Browser)")
             log.info("A browser window will open. Log in with your Microsoft account.")
             log.info("Make sure your Microsoft account owns Minecraft!\n")
-            log.info("Tip: omit --browser to use device code login (simpler, no copy-paste).\n")
+            log.info("Tip: use --device-code for device code login (requires a custom Azure app).\n")
             auth = MicrosoftAuth()
             auth.login()
-        else:
-            auth = MicrosoftAuth()
-            auth.device_code_login()
 
         uid = auth.uuid
         if len(uid) == 32:
@@ -1923,7 +2822,7 @@ def main():
                     hint="  python mc_launcher.py login        # Microsoft login\n"
                          "  python mc_launcher.py offline Steve # Offline mode")
         launcher.launch(args.version, account, args.ram,
-                        use_fabric=args.fabric,
+                        loader=args.loader,
                         width=args.width, height=args.height)
 
 if __name__ == "__main__":

@@ -3,8 +3,11 @@ minecraft/assets/
 minecraft/libraries/
 minecraft/natives/
 minecraft/versions/
+minecraft/java/
 minecraft/version_manifest_v2.json
 minecraft/launcher_accounts.json
+minecraft/launcher_profiles.json
+*-installer.jar.log
 
 # Python
 __pycache__/
@@ -14,6 +17,7 @@ __pycache__/
 dist/
 build/
 *.spec
+!mc_launcher.spec
 
 # IDE
 .vscode/

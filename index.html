@@ -359,7 +359,7 @@ footer a:hover{color:var(--green)}
   <div class="logo">MC CLI Launcher<span class="cursor"></span></div>
   <p class="subtitle">
     Minecraft 命令行启动器<br>
-    <em>设备码登录</em> · Fabric 加载器 · Modrinth 模组管理
+    <em>浏览器登录</em> · Fabric / Forge / NeoForge · Modrinth
   </p>
   <a href="https://github.com/Hotsteel2901/mc_py_cli_launcher" class="btn-primary">View on GitHub</a>
 </header>
@@ -370,18 +370,28 @@ footer a:hover{color:var(--green)}
   <div class="features-grid">
     <div class="feature-card">
       <div class="feature-label">Auth</div>
-      <div class="feature-title">设备码登录</div>
-      <div class="feature-desc">一行命令登录 Microsoft 账号，无需复制粘贴 URL</div>
+      <div class="feature-title">浏览器登录</div>
+      <div class="feature-desc">默认浏览器登录 Microsoft 账号，复制粘贴 URL 即可</div>
     </div>
     <div class="feature-card">
       <div class="feature-label">Loader</div>
-      <div class="feature-title">Fabric 模组加载器</div>
-      <div class="feature-desc">一键安装 Fabric Loader，自动下载依赖库</div>
+      <div class="feature-title">Fabric / Forge / NeoForge</div>
+      <div class="feature-desc">三种主流加载器可选安装，版本隔离，同一版本可装多个加载器并在启动时切换</div>
+    </div>
+    <div class="feature-card">
+      <div class="feature-label">Java</div>
+      <div class="feature-title">Java 自动匹配</div>
+      <div class="feature-desc">按游戏版本要求自动选择本机 Java，缺失时自动下载 Mojang 官方运行时，不影响系统</div>
     </div>
     <div class="feature-card">
       <div class="feature-label">Mods</div>
-      <div class="feature-title">Modrinth 模组管理</div>
-      <div class="feature-desc">搜索、安装、更新模组，自动检测加载器类型</div>
+      <div class="feature-title">Modrinth</div>
+      <div class="feature-desc">搜索与安装模组，附带各加载器支持版本一览与依赖检测，无需 API Key</div>
+    </div>
+    <div class="feature-card">
+      <div class="feature-label">Search</div>
+      <div class="feature-title">精细搜索</div>
+      <div class="feature-desc">search-more 按 slug 查看模组详情：加载器支持表、支持的 MC 版本、最近发布</div>
     </div>
     <div class="feature-card">
       <div class="feature-label">Download</div>
@@ -424,25 +434,31 @@ footer a:hover{color:var(--green)}
       <span class="terminal-title">mc_launcher</span>
     </div>
     <div class="terminal-body">
-      <span class="comment"># 登录 Microsoft 账号（设备码，推荐）</span>
+      <span class="comment"># 登录 Microsoft 账号（浏览器，默认）</span>
       <span class="prompt">$ </span><span class="cmd">./mc_launcher login</span>
       <span class="blank"></span>
-      <span class="comment"># 或使用浏览器登录</span>
-      <span class="prompt">$ </span><span class="cmd">./mc_launcher login</span> <span class="flag">--browser</span>
+      <span class="comment"># 或使用设备码登录（需要自备 Azure 应用）</span>
+      <span class="prompt">$ </span><span class="cmd">./mc_launcher login</span> <span class="flag">--device-code</span>
       <span class="blank"></span>
-      <span class="comment"># 安装 Fabric 模组加载器</span>
-      <span class="prompt">$ </span><span class="cmd">./mc_launcher install-fabric</span> <span class="flag">-v 26.1.2</span>
+      <span class="comment"># 安装模组加载器（Fabric / Forge / NeoForge）</span>
+      <span class="prompt">$ </span><span class="cmd">./mc_launcher install-fabric</span> <span class="flag">-v 1.21.4</span>
+      <span class="prompt">$ </span><span class="cmd">./mc_launcher install-forge</span> <span class="flag">-v 1.20.1</span>
+      <span class="prompt">$ </span><span class="cmd">./mc_launcher install-neoforge</span> <span class="flag">-v 1.21.4</span>
       <span class="blank"></span>
-      <span class="comment"># 搜索并安装模组</span>
+      <span class="comment"># 搜索模组（附各加载器支持的最高版本）</span>
       <span class="prompt">$ </span><span class="cmd">./mc_launcher search sodium</span>
-      <span class="prompt">$ </span><span class="cmd">./mc_launcher install-mod sodium</span> <span class="flag">-v 26.1.2</span>
+      <span class="prompt">$ </span><span class="cmd">./mc_launcher search iris</span> <span class="flag">--limit 5</span>
       <span class="blank"></span>
-      <span class="comment"># 启动游戏</span>
-      <span class="prompt">$ </span><span class="cmd">./mc_launcher play</span> <span class="flag">-v 26.1.2</span>
+      <span class="comment"># 精细搜索：查看模组详情（需完整 slug）</span>
+      <span class="prompt">$ </span><span class="cmd">./mc_launcher search-more sodium</span>
       <span class="blank"></span>
-      <span class="comment"># 指定内存 / 窗口大小 / Java 路径</span>
-      <span class="prompt">$ </span><span class="cmd">./mc_launcher play</span> <span class="flag">-v 26.1.2 --ram 4G --width 1920 --height 1080</span>
-      <span class="prompt">$ </span><span class="cmd">./mc_launcher play</span> <span class="flag">-v 26.1.2 --java "C:\Program Files\Java\jdk-21\bin\javaw.exe"</span>
+      <span class="comment"># 安装并启动</span>
+      <span class="prompt">$ </span><span class="cmd">./mc_launcher install-mod sodium</span> <span class="flag">-v 1.21.4</span>
+      <span class="prompt">$ </span><span class="cmd">./mc_launcher play</span> <span class="flag">-v 1.21.4 --fabric</span>
+      <span class="blank"></span>
+      <span class="comment"># 指定内存 / 窗口大小 / Java 路径（默认自动匹配并按需下载 Java）</span>
+      <span class="prompt">$ </span><span class="cmd">./mc_launcher play</span> <span class="flag">-v 1.21.4 --ram 4G --width 1920 --height 1080</span>
+      <span class="prompt">$ </span><span class="cmd">./mc_launcher play</span> <span class="flag">-v 1.21.4 --java "C:\Program Files\Java\jdk-21\bin\javaw.exe"</span>
     </div>
   </div>
 </section>
