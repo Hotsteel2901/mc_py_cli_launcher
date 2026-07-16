@@ -349,13 +349,33 @@ class ModrinthAPI:
         dest = Path(dest_dir)
         dest.mkdir(parents=True, exist_ok=True)
         paths = []
-        for f in version_data.get("files", []):
+        files = version_data.get("files", [])
+
+        primary_files = [f for f in files if f.get("primary")]
+        if not primary_files:
+
+            primary_files = [f for f in files
+                             if not f["filename"].endswith("-sources.jar")
+                             and not f["filename"].endswith("-javadoc.jar")]
+
+        downloaded_names = set()
+        for f in primary_files:
             file_path = dest / f["filename"]
             if not file_path.exists():
                 _download_file(f["url"], file_path, label or f["filename"])
             else:
                 print(f"  {f['filename']} — cached")
             paths.append(file_path)
+            downloaded_names.add(f["filename"])
+
+        if downloaded_names:
+            for suffix in ("-sources.jar", "-javadoc.jar"):
+                for old in dest.glob(f"*{suffix}"):
+                    base = old.name[:-len(suffix)] + ".jar"
+                    if base in downloaded_names and old.exists():
+                        old.unlink()
+                        log.info(f"Removed stale {suffix[1:-4]} jar: {old.name}")
+
         return paths
 
 
@@ -1738,7 +1758,10 @@ class MinecraftLauncher:
 
             mods_dir = ModManager(self.game_dir)._mods_dir(mc_version)
             mod_jars = sorted(f for f in mods_dir.iterdir()
-                              if f.name.endswith(".jar") and not f.name.endswith(".disabled"))
+                              if f.name.endswith(".jar")
+                              and not f.name.endswith(".disabled")
+                              and not f.name.endswith("-sources.jar")
+                              and not f.name.endswith("-javadoc.jar"))
             if mod_jars:
                 extra_cp.extend(str(p) for p in mod_jars)
                 print(f"  Mods:    {len(mod_jars)} jar(s)")
