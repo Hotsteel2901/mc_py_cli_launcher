@@ -227,7 +227,8 @@ def _maven_rel_path(name: str) -> str:
     return f"{g.replace('.', '/')}/{a}/{v}/{jar_name}"
 
 def _download_file(url: str, dest_path, label: str = "", sha1: str = None,
-                   max_retries: int = 3, show_progress: bool = True):
+                   max_retries: int = 3, show_progress: bool = True,
+                   extra_headers: dict = None):
     dest = Path(dest_path)
     dest.parent.mkdir(parents=True, exist_ok=True)
     label = label or dest.name
@@ -245,6 +246,8 @@ def _download_file(url: str, dest_path, label: str = "", sha1: str = None,
         dest.unlink(missing_ok=True)
 
     headers = {"User-Agent": f"{LAUNCHER_NAME}/{LAUNCHER_VER}"}
+    if extra_headers:
+        headers.update(extra_headers)
     for attempt in range(max_retries):
         try:
             req = Request(url, headers=headers)
@@ -432,13 +435,13 @@ class CurseForgeAPI:
             if cf_loader:
                 params["modLoaderType"] = cf_loader
         data = self._request(f"/mods/{project_id}/files", params)
-        versions = [self._normalize_version(v) for v in (data or [])]
+        versions = [self._normalize_version(v, project_id) for v in (data or [])]
         if game_version:
             versions = [v for v in versions if game_version in v.get("game_versions", [])]
         return versions
 
-    def get_download_url(self, file_id):
-        return self._request(f"/mods/{file_id}/download-url")
+    def get_download_url(self, mod_id, file_id):
+        return self._request(f"/mods/{mod_id}/files/{file_id}/download-url")
 
     def _normalize_project(self, p):
         return {
@@ -452,7 +455,7 @@ class CurseForgeAPI:
             "source": "curseforge",
         }
 
-    def _normalize_version(self, v):
+    def _normalize_version(self, v, mod_id=None):
         game_versions = []
         loaders = []
         for gv in v.get("gameVersions", []):
@@ -462,9 +465,9 @@ class CurseForgeAPI:
                 loaders.append(gv.lower())
 
         url = v.get("downloadUrl")
-        if not url:
+        if not url and mod_id:
             try:
-                url = self.get_download_url(v["id"])
+                url = self.get_download_url(mod_id, v["id"])
             except SystemExit:
                 url = None
 
@@ -537,10 +540,12 @@ class CurseForgeSource:
         dest = Path(dest_dir)
         dest.mkdir(parents=True, exist_ok=True)
         paths = []
+        cf_headers = {"x-api-key": self.api.api_key}
         for f in version_data.get("files", []):
             file_path = dest / f["filename"]
             if not file_path.exists():
-                _download_file(f["url"], file_path, label or f["filename"])
+                _download_file(f["url"], file_path, label or f["filename"],
+                               extra_headers=cf_headers)
             else:
                 print(f"  {f['filename']} — cached")
             paths.append(file_path)
@@ -2148,8 +2153,8 @@ def main():
     parser = argparse.ArgumentParser(
         description="Simple Minecraft CLI Launcher — Microsoft + offline + Fabric/Forge/NeoForge + Modrinth/CurseForge mods",
         epilog="Examples:\n"
-               "  %(prog)s login                       # Microsoft login (device code, recommended)\n"
-               "  %(prog)s login --browser              # Browser login (copy-paste URL)\n"
+               "  %(prog)s login                       # Microsoft login (browser, default)\n"
+               "  %(prog)s login --device-code         # Device code login (requires custom Azure app)\n"
                "  %(prog)s offline Steve               # Offline mode (save credentials)\n"
                "  %(prog)s play                        # Launch with saved account + version\n"
                "  %(prog)s play -v 1.21.4              # Launch specific version\n"
