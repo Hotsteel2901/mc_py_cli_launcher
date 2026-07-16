@@ -781,6 +781,50 @@ class ModManager:
         return self.modrinth.search(query, limit=limit, loader=loader,
                                     game_version=game_version)
 
+    LOADERS_SHOWN = ("fabric", "forge", "neoforge")
+    _RELEASE_MC_RE = re.compile(r'^\d+\.\d+(\.\d+)?$')
+
+    @staticmethod
+    def _mc_key(v):
+        parts = re.findall(r'\d+', v)
+        return tuple(int(p) for p in parts) if parts else (0,)
+
+    @classmethod
+    def summarize_loader_support(cls, versions):
+        """Map loader -> (highest release MC version, mod version supporting it)."""
+        support = {}
+        for v in versions:
+            gvs = [g for g in v.get("game_versions", [])
+                   if cls._RELEASE_MC_RE.match(g)] or v.get("game_versions", [])
+            if not gvs:
+                continue
+            top = max(gvs, key=cls._mc_key)
+            for l in v.get("loaders", []):
+                l = l.lower()
+                cur = support.get(l)
+                if cur is None or cls._mc_key(top) > cls._mc_key(cur[0]):
+                    support[l] = (top, v.get("version_number", v.get("id", "?")))
+        return support
+
+    def loader_support(self, project_id):
+        try:
+            return self.summarize_loader_support(self.modrinth.get_versions(project_id))
+        except SystemExit:
+            raise
+        except Exception:
+            return {}
+
+    @classmethod
+    def format_loader_support(cls, support):
+        parts = []
+        for l in cls.LOADERS_SHOWN:
+            if l in support:
+                mc, modver = support[l]
+                parts.append(f"{l} <= MC {mc} ({modver})")
+            else:
+                parts.append(f"{l} \u2014")
+        return "  |  ".join(parts)
+
     def _detect_loaders(self, mc_version):
         found = []
         for loader in ("fabric", "neoforge", "forge"):
@@ -822,12 +866,11 @@ class ModManager:
             if not target:
                 log.die(f"Version '{version_id}' not found for {proj_title}")
         else:
-            def _sort_key(v):
+            def _loader_match(v):
                 loaders = [l.lower() for l in v.get("loaders", [])]
-                loader_match = 0 if loader and loader.lower() in loaders else 1
-                date = v.get("date_published", "")
-                return (loader_match, date)
-            versions.sort(key=_sort_key)
+                return 0 if loader and loader.lower() in loaders else 1
+            versions.sort(key=lambda v: v.get("date_published", ""), reverse=True)
+            versions.sort(key=_loader_match)
             target = versions[0]
 
         ver_num = target.get("version_number", target["id"])
@@ -835,7 +878,10 @@ class ModManager:
         loaders_str = ", ".join(target.get("loaders", ["?"]))
         if loader and loader.lower() not in [l.lower() for l in target.get("loaders", [])]:
             log.warn(f"Note: selected version uses loader '{loaders_str}', not '{loader}'")
-        log.info(f"Installing {proj_title} {ver_num} (MC: {mc_str}, Loaders: {loaders_str})...")
+        log.info(f"Installing {proj_title}...")
+        print(f"    Mod version:   {ver_num}")
+        print(f"    Game versions: {mc_str}")
+        print(f"    Loaders:       {loaders_str}")
 
         self._check_dependencies(target, mc_version, loader)
 
@@ -873,8 +919,8 @@ class ModManager:
             if dep_versions:
                 def _dk(v):
                     loaders = [l.lower() for l in v.get("loaders", [])]
-                    lm = 0 if loader and loader.lower() in loaders else 1
-                    return (lm, v.get("date_published", ""))
+                    return 0 if loader and loader.lower() in loaders else 1
+                dep_versions.sort(key=lambda v: v.get("date_published", ""), reverse=True)
                 dep_versions.sort(key=_dk)
                 dep_ver_num = dep_versions[0].get("version_number", dep_versions[0]["id"])
                 dep_mc = ", ".join(dep_versions[0].get("game_versions", ["?"]))
@@ -929,11 +975,22 @@ class ModManager:
                                               game_version=mc_version)
         if versions:
             return project, versions
+
+        proj_title = project.get("title", slug)
         extra = f" for MC {mc_version}"
         extra += f" ({loader})" if loader else ""
+        log.error(f"No versions found for {proj_title}{extra}")
+        support = self.loader_support(project["id"])
+        if support:
+            print(f"\n  Available support for '{proj_title}':")
+            print(f"    {self.format_loader_support(support)}")
+            others = {l: s for l, s in support.items() if l not in self.LOADERS_SHOWN}
+            for l, (mc, modver) in sorted(others.items()):
+                print(f"    {l} <= MC {mc} ({modver})")
+            print()
         if not loader:
-            extra += "\n  Hint: install a loader first, or specify --loader manually"
-        log.die(f"No versions found for {slug}{extra}")
+            print("  Hint: install a loader first, or specify --loader manually")
+        sys.exit(1)
 
     def list_mods(self, mc_version):
         mods_dir = self._mods_dir(mc_version)
@@ -992,21 +1049,36 @@ def find_free_port():
         s.bind(("127.0.0.1", 0))
         return s.getsockname()[1]
 
-def check_java():
-    java = None
+def _java_major(java_path):
+    try:
+        out = subprocess.check_output([str(java_path), "-version"],
+                                      stderr=subprocess.STDOUT, text=True, timeout=15)
+        m = re.search(r'version "(\d+)(?:\.(\d+))?', out)
+        if not m:
+            return None
+        major = int(m.group(1))
+        if major == 1 and m.group(2):
+            major = int(m.group(2))
+        return major
+    except Exception:
+        return None
+
+def _find_java_candidates():
     candidates = []
+    java_bin = "java.exe" if platform.system() == "Windows" else "java"
 
     jh = os.environ.get("JAVA_HOME", "")
     if jh:
-        java_bin = "java.exe" if platform.system() == "Windows" else "java"
         je = Path(jh) / "bin" / java_bin
         if je.exists():
-            java = str(je)
+            candidates.append(str(je))
 
-    if not java:
-        java = shutil.which("java")
+    w = shutil.which("java")
+    if w:
+        candidates.append(w)
 
-    if not java and platform.system() == "Windows":
+    scanned = []
+    if platform.system() == "Windows":
         import winreg
         reg_roots = [
             (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Eclipse Adoptium\JDK"),
@@ -1026,40 +1098,35 @@ def check_java():
                                 jh_reg, _ = winreg.QueryValueEx(sk, "Path")
                                 je = Path(jh_reg) / "bin" / "java.exe"
                                 if je.exists():
-                                    candidates.append(str(je))
+                                    scanned.append(str(je))
                             i += 1
                         except OSError:
                             break
             except OSError:
                 continue
 
-    if not java and platform.system() == "Windows":
         user_home = Path(os.environ.get("USERPROFILE", Path.home()))
         for d in sorted(user_home.glob("jdk-*"), reverse=True):
             je = d / "bin" / "java.exe"
             if je.exists():
-                candidates.append(str(je))
+                scanned.append(str(je))
 
-    if not java and platform.system() == "Windows":
         for base in [r"C:\Program Files\Java", r"C:\Program Files\Eclipse Adoptium",
                      r"C:\Program Files\Microsoft", r"C:\Program Files\Eclipse Foundation",
                      r"C:\Program Files (x86)\Java"]:
             bp = Path(base)
             if bp.exists():
-
                 for d in bp.glob("*"):
                     if d.is_dir():
                         je = d / "bin" / "java.exe"
-                        if je.exists() and str(je) not in candidates:
-                            candidates.append(str(je))
-
+                        if je.exists() and str(je) not in scanned:
+                            scanned.append(str(je))
                         for sd in d.glob("*"):
                             if sd.is_dir():
                                 je2 = sd / "bin" / "java.exe"
-                                if je2.exists() and str(je2) not in candidates:
-                                    candidates.append(str(je2))
-
-    if not java and platform.system() != "Windows":
+                                if je2.exists() and str(je2) not in scanned:
+                                    scanned.append(str(je2))
+    else:
         for base in ["/usr/lib/jvm", "/usr/local/opt", Path.home() / ".sdkman/candidates/java",
                      Path.home() / ".jdks"]:
             bp = Path(base)
@@ -1067,35 +1134,172 @@ def check_java():
                 for d in sorted(bp.glob("*"), reverse=True):
                     je = d / "bin" / "java"
                     if je.exists():
-                        candidates.append(str(je))
+                        scanned.append(str(je))
 
         hb = Path("/usr/local/opt/openjdk/bin/java")
         if hb.exists():
-            candidates.append(str(hb))
+            scanned.append(str(hb))
 
-    if not java and candidates:
+    def _key(p):
+        nums = re.findall(r'(\d+)', p)
+        return tuple(int(n) for n in nums) if nums else (0,)
+    scanned.sort(key=_key, reverse=True)
 
-        def _key(p):
-            nums = re.findall(r'(\d+)', p)
-            return tuple(int(n) for n in nums) if nums else (0,)
-        candidates.sort(key=_key, reverse=True)
-        java = candidates[0]
+    seen = set()
+    result = []
+    for c in candidates + scanned:
+        try:
+            key = str(Path(c).resolve())
+        except OSError:
+            key = c
+        if key not in seen:
+            seen.add(key)
+            result.append(c)
+    return result
 
-    if not java:
+def check_java(required_major=None):
+    candidates = _find_java_candidates()
+
+    if required_major:
+        for c in candidates:
+            if _java_major(c) == required_major:
+                return c
+        return None
+
+    if not candidates:
         log.die("Java not found. Install Java 17+ from https://adoptium.net/",
                 hint='If you already installed Java, set JAVA_HOME:\n         PowerShell: $env:JAVA_HOME = "C:\\path\\to\\jdk"')
 
-    try:
-        out = subprocess.check_output([java, "-version"], stderr=subprocess.STDOUT, text=True)
-        m = re.search(r'version "(\d+)', out)
-        if m:
-            ver = int(m.group(1))
-            if ver < 17:
-                log.warn(f"Java {ver} detected. Minecraft 1.18+ needs Java 17+.")
-                print(f"  Found at: {java}")
-    except Exception:
-        pass
+    java = candidates[0]
+    ver = _java_major(java)
+    if ver and ver < 17:
+        log.warn(f"Java {ver} detected. Minecraft 1.18+ needs Java 17+.")
+        print(f"  Found at: {java}")
     return java
+
+MOJANG_JAVA_MANIFEST = ("https://launchermeta.mojang.com/v1/products/java-runtime/"
+                        "2ec0cc96c44e5a76b9c8b7c39df7210883d12871/all.json")
+
+def _mojang_java_platform():
+    osn = os_name()
+    arch = os_arch()
+    if osn == "windows":
+        return "windows-arm64" if arch == "arm64" else "windows-x64"
+    if osn == "osx":
+        return "mac-os-arm64" if arch == "arm64" else "mac-os"
+    if osn == "linux" and arch == "x86_64":
+        return "linux"
+    return None
+
+def download_mojang_java(game_dir: Path, component: str, max_workers=4):
+    """Download Mojang's bundled Java runtime (same as the official launcher).
+    Returns path to the java executable, or None on failure."""
+    dest_root = game_dir / "java" / component
+    exe_name = "java.exe" if platform.system() == "Windows" else "java"
+
+    existing = sorted(dest_root.glob(f"**/bin/{exe_name}"))
+    if existing:
+        return str(existing[0])
+
+    plat = _mojang_java_platform()
+    if not plat:
+        log.warn(f"No Mojang Java runtime available for {os_name()}/{os_arch()}.")
+        return None
+
+    try:
+        status, body = _http_get(MOJANG_JAVA_MANIFEST)
+        if status != 200:
+            log.warn(f"Mojang Java runtime index fetch failed ({status})")
+            return None
+        entries = json.loads(body).get(plat, {}).get(component, [])
+        if not entries:
+            log.warn(f"Mojang has no Java runtime '{component}' for platform '{plat}'.")
+            return None
+        ver_name = entries[0].get("version", {}).get("name", "?")
+        status, body = _http_get(entries[0]["manifest"]["url"])
+        if status != 200:
+            log.warn(f"Mojang Java runtime manifest fetch failed ({status})")
+            return None
+        files = json.loads(body).get("files", {})
+    except Exception as e:
+        log.warn(f"Mojang Java runtime metadata error: {e}")
+        return None
+
+    downloads = []
+    links = []
+    executables = []
+    for rel, info in sorted(files.items()):
+        target = dest_root / rel
+        ftype = info.get("type")
+        if ftype == "directory":
+            target.mkdir(parents=True, exist_ok=True)
+        elif ftype == "file":
+            raw = info.get("downloads", {}).get("raw")
+            if not raw:
+                continue
+            if not (target.exists() and raw.get("sha1")
+                    and _sha1_file(target) == raw["sha1"]):
+                downloads.append((raw["url"], target, raw.get("sha1")))
+            if info.get("executable"):
+                executables.append(target)
+        elif ftype == "link" and info.get("target"):
+            links.append((target, info["target"]))
+
+    log.info(f"Downloading Java runtime {ver_name} ({component}): "
+             f"{len(downloads)} files [{max_workers} threads]...")
+
+    fail = [0]
+    done = [0]
+    lock = threading.Lock()
+
+    def _fetch(url, dest, sha1):
+        try:
+            _download_file(url, dest, "", sha1=sha1, show_progress=False)
+            return True
+        except Exception:
+            return False
+
+    if downloads:
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            futures = {pool.submit(_fetch, u, d, s): d for u, d, s in downloads}
+            for f in as_completed(futures):
+                with lock:
+                    if f.result():
+                        done[0] += 1
+                    else:
+                        fail[0] += 1
+                    n = done[0] + fail[0]
+                    pct = n * 100 // len(downloads)
+                    filled = pct * 25 // 100
+                    bar = "\u2588" * filled + "\u2591" * (25 - filled)
+                    print(f"\r  [{pct:3d}%] {bar} {n}/{len(downloads)} files",
+                          end="", flush=True)
+        print()
+
+    if fail[0]:
+        log.warn(f"{fail[0]} Java runtime file(s) failed to download.")
+        return None
+
+    if platform.system() != "Windows":
+        for t in executables:
+            try:
+                t.chmod(t.stat().st_mode | 0o755)
+            except OSError:
+                pass
+        for target, link_target in links:
+            try:
+                if not target.exists() and not target.is_symlink():
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    os.symlink(link_target, target)
+            except OSError:
+                pass
+
+    java_bins = sorted(dest_root.glob(f"**/bin/{exe_name}"))
+    if not java_bins:
+        log.warn("Java runtime downloaded but java executable not found.")
+        return None
+    log.success(f"Java runtime {ver_name} installed -> {dest_root}")
+    return str(java_bins[0])
 
 def os_name():
     p = platform.system().lower()
@@ -1726,6 +1930,46 @@ class MinecraftLauncher:
             self._java = check_java()
         return self._java
 
+    def _select_java(self, version_data):
+        """Pick a Java matching the version's required major (e.g. 21 for 1.21.x).
+        Forge/NeoForge toolchains (Mixin/ASM) break on newer Java, so an exact
+        major match is preferred; falls back to Mojang's bundled runtime."""
+        jv = version_data.get("javaVersion", {}) or {}
+        required = jv.get("majorVersion")
+        component = jv.get("component", "java-runtime-gamma")
+
+        if self._java is not None:
+            major = _java_major(self._java)
+            if required and major and major != required:
+                log.warn(f"Specified Java is version {major}, but Minecraft "
+                         f"{version_data.get('id', '?')} expects Java {required}. "
+                         f"Mods (Forge/NeoForge) may crash.")
+            return self._java
+
+        if not required:
+            return self.java
+
+        java = check_java(required_major=required)
+        if java:
+            self._java = java
+            return java
+
+        exe_name = "java.exe" if platform.system() == "Windows" else "java"
+        cached = sorted((self.game_dir / "java" / component).glob(f"**/bin/{exe_name}"))
+        if cached:
+            self._java = str(cached[0])
+            return self._java
+
+        log.info(f"No local Java {required} found; fetching Mojang Java runtime...")
+        java = download_mojang_java(self.game_dir, component, self.threads)
+        if java:
+            self._java = java
+            return java
+
+        log.warn(f"Could not get Java {required}; falling back to system Java. "
+                 f"Modded launches may crash (e.g. Mixin errors on newer Java).")
+        return self.java
+
     def _load_loader_profile(self, mc_version, loader=None, use_fabric=False):
         if loader is None and use_fabric:
             loader = "fabric"
@@ -1733,12 +1977,10 @@ class MinecraftLauncher:
             path = self.game_dir / "libraries" / loader / f"{loader}-profile-{mc_version}.json"
             if path.exists():
                 return loader, json.loads(path.read_text(encoding="utf-8"))
-            if use_fabric:
-                log.warn(f"--fabric set but no Fabric profile found for {mc_version}.")
-                log.warn(f"Run: python mc_launcher.py install-fabric -v {mc_version}")
-            elif loader:
-                log.warn(f"No {loader} profile found for {mc_version}.")
-            return None, None
+            install_cmd = ("install-fabric" if loader == "fabric"
+                           else f"install-{loader}")
+            log.die(f"--{loader} requested but no {loader} profile found for {mc_version}.",
+                    hint=f"Install it first: python mc_launcher.py {install_cmd} -v {mc_version}")
 
         for candidate in ("fabric", "neoforge", "forge"):
             path = self.game_dir / "libraries" / candidate / f"{candidate}-profile-{mc_version}.json"
@@ -1843,7 +2085,12 @@ class MinecraftLauncher:
                               and not f.name.endswith("-sources.jar")
                               and not f.name.endswith("-javadoc.jar"))
             if mod_jars:
-                extra_cp.extend(str(p) for p in mod_jars)
+                # Forge/NeoForge (BootstrapLauncher) must NOT have mod jars on the
+                # classpath: they would be turned into boot-layer modules and FML
+                # would then skip them when scanning the mods folder. Both loaders
+                # discover mods from <gameDir>/mods on their own.
+                if loader == "fabric":
+                    extra_cp.extend(str(p) for p in mod_jars)
                 print(f"  Mods:    {len(mod_jars)} jar(s)")
 
         all_cp = [client_jar] + lib_jars + extra_cp
@@ -1967,9 +2214,11 @@ class MinecraftLauncher:
         if not any("-cp" in a or "-classpath" in a for a in jvm_args):
             jvm_args = jvm_args + ["-cp", classpath]
 
-        cmd = [self.java] + jvm_args + [main_class] + game_args
+        java = self._select_java(version_data)
+        java_ver = _java_major(java)
+        cmd = [java] + jvm_args + [main_class] + game_args
 
-        log.info(f"Java:    {self.java}")
+        log.info(f"Java:    {java}" + (f" (Java {java_ver})" if java_ver else ""))
         log.info(f"Version: {version_id}")
         log.info(f"Player:  {username}")
         log.info(f"RAM:     {ram_mb} MB")
@@ -2083,6 +2332,7 @@ def main():
                "  %(prog)s list-versions               # List all Minecraft versions\n"
                "  %(prog)s list-loaders                # List all mod loaders\n"
                "  %(prog)s search sodium               # Search mods on Modrinth\n"
+               "  %(prog)s search-more sodium          # Detailed info (exact slug required)\n"
                "  %(prog)s install-fabric -v 1.21.4    # Install Fabric loader\n"
                "  %(prog)s install-forge -v 1.20.1     # Install Forge loader\n"
                "  %(prog)s install-neoforge -v 1.21.4  # Install NeoForge loader\n"
@@ -2099,7 +2349,7 @@ def main():
                         choices=["login", "offline", "play", "launch", "download",
                                  "logout", "accounts",
                                  "list-versions", "list-loaders", "list-installed",
-                                 "list-mods", "search",
+                                 "list-mods", "search", "search-more",
                                  "install-fabric", "install-forge", "install-neoforge",
                                  "install-mod",
                                  "disable-mod", "enable-mod", "uninstall-mod"],
@@ -2341,6 +2591,17 @@ def main():
         if not hits:
             log.warn("No results found.")
             return
+
+        support_map = {}
+        with ThreadPoolExecutor(max_workers=min(8, len(hits))) as pool:
+            futures = {pool.submit(mm.loader_support, h["project_id"]): h["project_id"]
+                       for h in hits if h.get("project_id")}
+            for f in as_completed(futures):
+                try:
+                    support_map[futures[f]] = f.result()
+                except Exception:
+                    support_map[futures[f]] = {}
+
         for i, h in enumerate(hits):
             title = h.get("title", h.get("slug", "?"))
             desc = h.get("description", "")[:100]
@@ -2352,20 +2613,99 @@ def main():
             print(f"      slug: {h.get('slug', '?')}  |  source: {source}")
             print(f"      by: {author}  |  downloads: {downloads:,}")
             print(f"      categories: {categories}")
+            support = support_map.get(h.get("project_id"), {})
+            if support:
+                print(f"      support: {ModManager.format_loader_support(support)}")
             if desc:
                 print(f"      {desc}...")
             print()
         log.info(f"Found {len(hits)} result(s).")
         log.info("Install with: python mc_launcher.py install-mod <slug> -v <version>")
+        log.info("Details with: python mc_launcher.py search-more <slug>")
         return
 
-    if args.action == "install-fabric":
+    if args.action == "search-more":
+        slug = args.query
+        if not slug:
+            log.die("Please provide the exact mod slug.\n  Example: python mc_launcher.py search-more sodium")
+        mm = ModManager(game_dir)
+        try:
+            project = mm.modrinth.get_project(slug)
+        except SystemExit:
+            log.die(f"Project '{slug}' not found. search-more requires the EXACT slug.",
+                    hint=f"Find the slug first: python mc_launcher.py search {slug}")
+
+        versions = mm.modrinth.get_versions(project["id"])
+        support = ModManager.summarize_loader_support(versions)
+
+        title = project.get("title", slug)
+        log.header(f"{title}")
+        print(f"  slug:        {project.get('slug', '?')}")
+        print(f"  project id:  {project.get('id', '?')}")
+        print(f"  downloads:   {project.get('downloads', 0):,}")
+        print(f"  followers:   {project.get('followers', 0):,}")
+        print(f"  client/server: {project.get('client_side', '?')} / {project.get('server_side', '?')}")
+        lic = project.get("license") or {}
+        print(f"  license:     {lic.get('id', '?')}")
+        print(f"  categories:  {', '.join(project.get('categories', []))}")
+        print(f"  updated:     {project.get('updated', '?')[:10]}")
+        if project.get("source_url"):
+            print(f"  source:      {project['source_url']}")
+        if project.get("issues_url"):
+            print(f"  issues:      {project['issues_url']}")
+        desc = project.get("description", "")
+        if desc:
+            print(f"\n  {desc}")
+
+        print(f"\n  Loader support (highest game version):")
+        for l in ModManager.LOADERS_SHOWN:
+            if l in support:
+                mc, modver = support[l]
+                print(f"    {l:<10s} <= MC {mc:<10s} latest mod version: {modver}")
+            else:
+                print(f"    {l:<10s} not supported")
+        for l, (mc, modver) in sorted(support.items()):
+            if l not in ModManager.LOADERS_SHOWN:
+                print(f"    {l:<10s} <= MC {mc:<10s} latest mod version: {modver}")
+
+        all_mc = {g for v in versions for g in v.get("game_versions", [])
+                  if ModManager._RELEASE_MC_RE.match(g)}
+        if all_mc:
+            mc_sorted = sorted(all_mc, key=ModManager._mc_key)
+            shown = ", ".join(mc_sorted[-12:])
+            prefix = "..., " if len(mc_sorted) > 12 else ""
+            print(f"\n  Supported MC releases: {prefix}{shown}")
+
+        versions_sorted = sorted(versions, key=lambda v: v.get("date_published", ""),
+                                 reverse=True)
+        print(f"\n  Recent versions ({min(8, len(versions_sorted))} of {len(versions_sorted)}):")
+        for v in versions_sorted[:8]:
+            vn = v.get("version_number", v.get("id", "?"))
+            gv = ", ".join(v.get("game_versions", ["?"])[-4:])
+            ld = ", ".join(v.get("loaders", ["?"]))
+            date = v.get("date_published", "?")[:10]
+            vtype = v.get("version_type", "?")
+            print(f"    {vn:<36s} {vtype:<8s} MC {gv:<24s} [{ld}]  {date}")
+        print(f"\n  Install: python mc_launcher.py install-mod {project.get('slug', slug)} -v <version> --loader <loader>")
+        return
+
+    if args.action in ("install-fabric", "install-forge", "install-neoforge"):
         mc_version = args.version
+        vm = VersionManager(game_dir)
         if not mc_version:
-            manifest = VersionManager(game_dir).fetch_manifest()
+            manifest = vm.fetch_manifest()
             mc_version = manifest["latest"]["release"]
             log.info(f"Using latest Minecraft release: {mc_version}")
+        else:
+            manifest = vm.fetch_manifest()
+            known = {v["id"] for v in manifest.get("versions", [])}
+            if mc_version not in known:
+                close = [v for v in known if v.startswith(mc_version[:4])]
+                close.sort()
+                hint = f"Did you mean: {', '.join(close[-8:])}" if close else ""
+                log.die(f"Minecraft version '{mc_version}' does not exist.", hint=hint)
 
+    if args.action == "install-fabric":
         log.header("Install Fabric Loader")
         log.info(f"Target MC version: {mc_version}")
 
@@ -2380,12 +2720,6 @@ def main():
         return
 
     if args.action == "install-forge":
-        mc_version = args.version
-        if not mc_version:
-            manifest = VersionManager(game_dir).fetch_manifest()
-            mc_version = manifest["latest"]["release"]
-            log.info(f"Using latest Minecraft release: {mc_version}")
-
         log.header("Install Forge Loader")
         log.info(f"Target MC version: {mc_version}")
 
@@ -2400,12 +2734,6 @@ def main():
         return
 
     if args.action == "install-neoforge":
-        mc_version = args.version
-        if not mc_version:
-            manifest = VersionManager(game_dir).fetch_manifest()
-            mc_version = manifest["latest"]["release"]
-            log.info(f"Using latest Minecraft release: {mc_version}")
-
         log.header("Install NeoForge Loader")
         log.info(f"Target MC version: {mc_version}")
 
@@ -2443,11 +2771,9 @@ def main():
         title = project.get("title", slug)
         source = project.get("source", "?")
         log.success(f"{title} installed for Minecraft {mc_version} (source: {source})!")
-        detected = mm._detect_loaders(mc_version)
-        if detected:
-            loader = detected[0]
-            flag = f"--{loader}"
-            print(f"  Launch with: python mc_launcher.py launch -v {mc_version} {flag}")
+        used_loader = mm._pick_loader(mc_version, args.loader)
+        if used_loader:
+            print(f"  Launch with: python mc_launcher.py launch -v {mc_version} --{used_loader}")
         else:
             print(f"  Install a loader first, e.g.: python mc_launcher.py install-fabric -v {mc_version}")
             print(f"  Then launch: python mc_launcher.py launch -v {mc_version} --fabric")
