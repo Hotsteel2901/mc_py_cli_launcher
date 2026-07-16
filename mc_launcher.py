@@ -893,13 +893,15 @@ class ModManager:
                 else:
                     required_missing.append((dep_title, dep_slug, dep_ver_num, dep_mc))
             else:
+                if present:
+                    log.info(f"[dep: optional] {dep_title} — already installed")
                 optional_list.append((dep_title, dep_slug, dep_ver_num, dep_mc, present))
 
         if required_missing or optional_list:
             print()
             log.header("Dependencies")
             if required_missing:
-                print(f"  {_Log.BOLD}{_Log.RED}Required dependencies (MUST install manually):{_Log.RESET}")
+                print(f"  {_Log.BOLD}{_Log.RED}[ MUST INSTALL ] Required dependencies:{_Log.RESET}")
                 for title, slug, ver, mc in required_missing:
                     print(f"    {_Log.RED}- {title}{_Log.RESET}")
                     print(f"      slug:    {slug}")
@@ -907,11 +909,14 @@ class ModManager:
                     print(f"      install: python mc_launcher.py install-mod {slug} -v {mc_version}" +
                           (f" --loader {loader}" if loader else ""))
             if optional_list:
-                print(f"  {_Log.YELLOW}Optional dependencies:{_Log.RESET}")
+                print(f"  {_Log.BOLD}{_Log.YELLOW}[ RECOMMENDED ] Optional dependencies:{_Log.RESET}")
                 for title, slug, ver, mc, present in optional_list:
                     mark = f"{_Log.GREEN}[installed]{_Log.RESET} " if present else ""
                     print(f"    {mark}{title}")
-                    print(f"      slug: {slug} | version: {ver} | MC: {mc}")
+                    print(f"      slug:    {slug}")
+                    print(f"      version: {ver}  (MC: {mc})")
+                    print(f"      install: python mc_launcher.py install-mod {slug} -v {mc_version}" +
+                          (f" --loader {loader}" if loader else ""))
             print()
             if required_missing:
                 log.warn(f"{len(required_missing)} required dependency(ies) missing. "
