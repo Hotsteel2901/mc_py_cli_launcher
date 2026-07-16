@@ -28,6 +28,7 @@ if sys.stdout and hasattr(sys.stdout, "reconfigure") and sys.stdout.encoding.low
 
 MS_CLIENT_ID   = "00000000402b5328"
 MS_REDIRECT    = "https://login.live.com/oauth20_desktop.srf"
+MS_SCOPE       = "service::user.auth.xboxlive.com::MBI_SSL"
 MS_AUTH_URL    = "https://login.live.com/oauth20_authorize.srf"
 MS_TOKEN_URL   = "https://login.live.com/oauth20_token.srf"
 MS_DEVICE_AUTH = "https://login.microsoftonline.com/consumers/oauth2/v2.0/devicecode"
@@ -1275,9 +1276,13 @@ class MicrosoftAuth:
         params = {
             "client_id": MS_CLIENT_ID,
             "response_type": "code",
-            "scope": "XboxLive.signin offline_access",
+            "scope": MS_SCOPE,
             "redirect_uri": MS_REDIRECT,
             "prompt": "select_account",
+            "lw": "1",
+            "fl": "dob,easi2",
+            "xsup": "1",
+            "nopa": "2",
         }
         auth_url = f"{MS_AUTH_URL}?{urlencode(params)}"
 
@@ -1315,6 +1320,7 @@ class MicrosoftAuth:
             "code": auth_code,
             "grant_type": "authorization_code",
             "redirect_uri": MS_REDIRECT,
+            "scope": MS_SCOPE,
         }))
         if status != 200:
             log.die(f"Token exchange failed ({status})", 
@@ -1339,7 +1345,7 @@ class MicrosoftAuth:
 """)
         status, body = _http_post(MS_DEVICE_AUTH, data=urlencode({
             "client_id": MS_CLIENT_ID,
-            "scope": "XboxLive.signin offline_access",
+            "scope": MS_SCOPE,
         }))
         if status != 200:
             log.die(f"Device code request failed ({status})", 
@@ -1399,17 +1405,22 @@ class MicrosoftAuth:
 
     def do_full_auth_chain(self, ms_access_token):
 
-        status, body = _http_post(XBL_AUTH_URL, json_data={
-            "Properties": {
-                "AuthMethod": "RPS",
-                "SiteName": "user.auth.xboxlive.com",
-                "RpsTicket": f"d={ms_access_token}",
-            },
-            "RelyingParty": "http://auth.xboxlive.com",
-            "TokenType": "JWT",
-        })
+        # Xbox Live RPS sometimes requires the "d=" prefix and sometimes rejects it.
+        # Try both variants before giving up.
+        for ticket in (ms_access_token, f"d={ms_access_token}"):
+            status, body = _http_post(XBL_AUTH_URL, json_data={
+                "Properties": {
+                    "AuthMethod": "RPS",
+                    "SiteName": "user.auth.xboxlive.com",
+                    "RpsTicket": ticket,
+                },
+                "RelyingParty": "http://auth.xboxlive.com",
+                "TokenType": "JWT",
+            })
+            if status == 200:
+                break
         if status != 200:
-            log.die(f"Xbox Live auth failed ({status})", 
+            log.die(f"Xbox Live auth failed ({status})",
                     hint=body.decode(errors="replace")[:300])
         xbl = json.loads(body)
         xbl_token = xbl["Token"]
@@ -1461,7 +1472,7 @@ class MicrosoftAuth:
             "client_id": MS_CLIENT_ID,
             "refresh_token": refresh_token,
             "grant_type": "refresh_token",
-            "scope": "XboxLive.signin offline_access",
+            "scope": MS_SCOPE,
         }))
         if status != 200:
             log.warn(f"Microsoft token refresh failed ({status})")
@@ -2214,7 +2225,9 @@ def main():
     parser.add_argument("--neoforge", action="store_true",
                         help="Launch with NeoForge loader (auto-detected if installed)")
     parser.add_argument("--browser", action="store_true",
-                        help="Use browser login instead of device code (requires URL copy-paste)")
+                        help="Use browser login (default; requires URL copy-paste)")
+    parser.add_argument("--device-code", action="store_true",
+                        help="Use Microsoft device code login (requires a custom Azure app)")
 
     args = parser.parse_args()
     game_dir = Path(args.dir)
@@ -2531,16 +2544,16 @@ def main():
         return
 
     if args.action == "login":
-        if args.browser:
+        if args.device_code:
+            auth = MicrosoftAuth()
+            auth.device_code_login()
+        else:
             log.header("Microsoft Login (Browser)")
             log.info("A browser window will open. Log in with your Microsoft account.")
             log.info("Make sure your Microsoft account owns Minecraft!\n")
-            log.info("Tip: omit --browser to use device code login (simpler, no copy-paste).\n")
+            log.info("Tip: use --device-code for device code login (requires a custom Azure app).\n")
             auth = MicrosoftAuth()
             auth.login()
-        else:
-            auth = MicrosoftAuth()
-            auth.device_code_login()
 
         uid = auth.uuid
         if len(uid) == 32:

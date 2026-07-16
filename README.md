@@ -28,11 +28,11 @@
 ### 1. 登录
 
 ```bash
-# 设备码登录（推荐，简单安全）
+# 浏览器登录（默认，需复制粘贴 URL）
 ./mc_launcher login
 
-# 浏览器登录（需复制粘贴 URL）
-./mc_launcher login --browser
+# 设备码登录（需要自备 Azure 应用，因为官方客户端 ID 不支持设备码）
+./mc_launcher login --device-code
 
 # 离线模式
 ./mc_launcher offline Steve
