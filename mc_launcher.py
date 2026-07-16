@@ -49,19 +49,9 @@ LAUNCHER_NAME = "simple-mc-cli"
 LAUNCHER_VER  = "2.0.0"
 
 MODRINTH_API  = "https://api.modrinth.com/v2"
-CURSEFORGE_API = "https://api.curseforge.com/v1"
 FORGE_MAVEN = "https://maven.minecraftforge.net/net/minecraftforge/forge"
 NEOFORGE_MAVEN = "https://maven.neoforged.net/releases/net/neoforged/neoforge"
 FABRIC_PROJECT_ID = "P7dR8mSH"
-
-# CurseForge mod loader type enum for /mods/{id}/files
-CURSEFORGE_LOADER_MAP = {
-    "forge": 1,
-    "fabric": 4,
-    "quilt": 5,
-    "neoforge": 6,
-}
-CURSEFORGE_LOADER_REVERSE = {v: k for k, v in CURSEFORGE_LOADER_MAP.items()}
 
 class _Log:
     _color_ok = None
@@ -368,119 +358,6 @@ class ModrinthAPI:
             paths.append(file_path)
         return paths
 
-class CurseForgeAPI:
-    GAME_ID_MINECRAFT = 432
-
-    def __init__(self, api_key: str = None):
-        self.api_key = api_key or os.environ.get("CURSEFORGE_API_KEY")
-        if not self.api_key:
-            log.die("CurseForge API key is required.",
-                    hint="Use --curseforge-key or set CURSEFORGE_API_KEY env variable.")
-
-    def _request(self, path, params=None):
-        url = f"{CURSEFORGE_API}{path}"
-        if params:
-            url = f"{url}?{urlencode(params)}"
-        headers = {
-            "User-Agent": f"{LAUNCHER_NAME}/{LAUNCHER_VER}",
-            "x-api-key": self.api_key,
-        }
-        status, body = _http_get(url, headers=headers)
-        if status == 403:
-            log.die("CurseForge API returned 403. Check your API key.")
-        if status != 200:
-            log.die(f"CurseForge API returned {status} for {path}",
-                    hint=body.decode(errors="replace")[:300])
-        return json.loads(body).get("data")
-
-    @staticmethod
-    def _is_mc_version(text: str) -> bool:
-        return bool(re.match(r"^\d+(\.\d+)+$", text) or
-                    re.match(r"^\d{2}w\d+[a-z]$", text))
-
-    def search_projects(self, query, index=0, limit=20, loader=None, game_version=None):
-        params = {
-            "gameId": self.GAME_ID_MINECRAFT,
-            "searchFilter": query,
-            "index": index,
-            "pageSize": limit,
-            "sortField": 2,
-            "sortOrder": "desc",
-        }
-        if loader:
-            cf_loader = CURSEFORGE_LOADER_MAP.get(loader.lower())
-            if cf_loader:
-                params["modLoaderType"] = cf_loader
-        if game_version:
-            params["gameVersion"] = game_version
-        data = self._request("/mods/search", params)
-        return [self._normalize_project(p) for p in (data or [])]
-
-    def get_project(self, slug_or_id):
-        if isinstance(slug_or_id, str) and slug_or_id.isdigit():
-            return self._normalize_project(self._request(f"/mods/{slug_or_id}"))
-        params = {"gameId": self.GAME_ID_MINECRAFT, "slug": slug_or_id}
-        data = self._request("/mods/search", params)
-        hits = [p for p in (data or []) if p.get("slug", "").lower() == slug_or_id.lower()]
-        if hits:
-            return self._normalize_project(hits[0])
-        log.die(f"CurseForge mod '{slug_or_id}' not found.")
-
-    def get_project_versions(self, project_id, loader=None, game_version=None, limit=50):
-        params = {"pageSize": limit}
-        if game_version:
-            params["gameVersion"] = game_version
-        if loader:
-            cf_loader = CURSEFORGE_LOADER_MAP.get(loader.lower())
-            if cf_loader:
-                params["modLoaderType"] = cf_loader
-        data = self._request(f"/mods/{project_id}/files", params)
-        versions = [self._normalize_version(v, project_id) for v in (data or [])]
-        if game_version:
-            versions = [v for v in versions if game_version in v.get("game_versions", [])]
-        return versions
-
-    def get_download_url(self, mod_id, file_id):
-        return self._request(f"/mods/{mod_id}/files/{file_id}/download-url")
-
-    def _normalize_project(self, p):
-        return {
-            "id": str(p.get("id")),
-            "slug": p.get("slug"),
-            "title": p.get("name"),
-            "description": p.get("summary", ""),
-            "author": (p.get("authors") or [{}])[0].get("name", "?"),
-            "downloads": p.get("downloadCount", 0),
-            "categories": [c.get("name") for c in p.get("categories", [])],
-            "source": "curseforge",
-        }
-
-    def _normalize_version(self, v, mod_id=None):
-        game_versions = []
-        loaders = []
-        for gv in v.get("gameVersions", []):
-            if self._is_mc_version(gv):
-                game_versions.append(gv)
-            elif gv.lower() in ("forge", "fabric", "quilt", "neoforge"):
-                loaders.append(gv.lower())
-
-        url = v.get("downloadUrl")
-        if not url and mod_id:
-            try:
-                url = self.get_download_url(mod_id, v["id"])
-            except SystemExit:
-                url = None
-
-        return {
-            "id": str(v.get("id")),
-            "version_number": v.get("displayName") or v.get("fileName"),
-            "game_versions": game_versions,
-            "loaders": loaders,
-            "date_published": v.get("fileDate", ""),
-            "files": [{"filename": v.get("fileName"), "url": url}] if url else [],
-            "source": "curseforge",
-        }
-
 
 class ModrinthSource:
     name = "modrinth"
@@ -518,38 +395,6 @@ class ModrinthSource:
     def download(self, version_data, dest_dir, label=""):
         return ModrinthAPI.download_version_files(version_data, dest_dir, label)
 
-
-class CurseForgeSource:
-    name = "curseforge"
-
-    def __init__(self, api_key: str = None):
-        self.api = CurseForgeAPI(api_key)
-
-    def search(self, query, limit=10, offset=0, loader=None, game_version=None):
-        return self.api.search_projects(query, index=offset, limit=limit,
-                                         loader=loader, game_version=game_version)
-
-    def get_project(self, slug_or_id):
-        return self.api.get_project(slug_or_id)
-
-    def get_versions(self, project_id, loader=None, game_version=None, limit=50):
-        return self.api.get_project_versions(project_id, loader=loader,
-                                              game_version=game_version, limit=limit)
-
-    def download(self, version_data, dest_dir, label=""):
-        dest = Path(dest_dir)
-        dest.mkdir(parents=True, exist_ok=True)
-        paths = []
-        cf_headers = {"x-api-key": self.api.api_key}
-        for f in version_data.get("files", []):
-            file_path = dest / f["filename"]
-            if not file_path.exists():
-                _download_file(f["url"], file_path, label or f["filename"],
-                               extra_headers=cf_headers)
-            else:
-                print(f"  {f['filename']} — cached")
-            paths.append(file_path)
-        return paths
 
 class FabricManager:
     FABRIC_META = "https://meta.fabricmc.net/v2"
@@ -887,12 +732,9 @@ class NeoForgeManager:
 
 
 class ModManager:
-    def __init__(self, game_dir: Path, curseforge_key: str = None):
+    def __init__(self, game_dir: Path):
         self.game_dir = game_dir
         self.modrinth = ModrinthSource()
-        self.curseforge = None
-        if curseforge_key or os.environ.get("CURSEFORGE_API_KEY"):
-            self.curseforge = CurseForgeSource(curseforge_key)
 
     def _mods_dir(self, mc_version):
         d = self.game_dir / "versions" / mc_version / "mods"
@@ -915,36 +757,9 @@ class ModManager:
         vers.sort(key=_key)
         return vers
 
-    def _source(self, source_name: str):
-        if source_name == "modrinth":
-            return self.modrinth
-        if source_name == "curseforge":
-            if not self.curseforge:
-                log.die("CurseForge source requested but no API key provided.",
-                        hint="Use --curseforge-key or set CURSEFORGE_API_KEY env variable.")
-            return self.curseforge
-        return self.modrinth
-
-    def _sources_for_auto(self):
-        sources = [self.modrinth]
-        if self.curseforge:
-            sources.append(self.curseforge)
-        return sources
-
-    def search(self, query, limit=10, source="auto", game_version=None, loader=None):
-        sources = ([self._source(source)] if source != "auto"
-                   else self._sources_for_auto())
-        for src in sources:
-            try:
-                hits = src.search(query, limit=limit, loader=loader,
-                                  game_version=game_version)
-            except SystemExit:
-                if source != "auto":
-                    raise
-                continue
-            if hits:
-                return hits
-        return []
+    def search(self, query, limit=10, game_version=None, loader=None):
+        return self.modrinth.search(query, limit=limit, loader=loader,
+                                    game_version=game_version)
 
     def _detect_loaders(self, mc_version):
         found = []
@@ -969,13 +784,13 @@ class ModManager:
                 return loader
         return detected[0]
 
-    def install(self, slug, mc_version, loader=None, version_id=None, source="auto"):
+    def install(self, slug, mc_version, loader=None, version_id=None):
         log.info(f"Resolving mod: {slug}...")
         loader = self._pick_loader(mc_version, loader)
         if loader:
             log.info(f"Using loader: {loader}")
 
-        project, versions, src = self._resolve_mod(slug, mc_version, loader, source)
+        project, versions = self._resolve_mod(slug, mc_version, loader)
         proj_title = project.get("title", slug)
 
         if version_id:
@@ -1000,35 +815,20 @@ class ModManager:
         loaders_str = ", ".join(target.get("loaders", ["?"]))
         if loader and loader.lower() not in [l.lower() for l in target.get("loaders", [])]:
             log.warn(f"Note: selected version uses loader '{loaders_str}', not '{loader}'")
-        log.info(f"Installing {proj_title} {ver_num} (MC: {mc_str}, Loaders: {loaders_str}, source: {src.name})...")
+        log.info(f"Installing {proj_title} {ver_num} (MC: {mc_str}, Loaders: {loaders_str})...")
 
         dest_dir = self._mods_dir(mc_version)
-        paths = src.download(target, dest_dir, f"{proj_title} {ver_num}")
+        paths = self.modrinth.download(target, dest_dir, f"{proj_title} {ver_num}")
         total_size = sum(p.stat().st_size for p in paths if p.exists())
         log.success(f"Installed {len(paths)} file(s) ({total_size / 1024:.1f} KB) -> {dest_dir}")
         return paths, target, project
 
-    def _resolve_mod(self, slug, mc_version, loader, source):
-        sources = ([self._source(source)] if source != "auto"
-                   else self._sources_for_auto())
-        last_error = None
-        for src in sources:
-            try:
-                project = src.get_project(slug)
-                versions = src.get_versions(project["id"], loader=loader,
-                                            game_version=mc_version)
-                if versions:
-                    return project, versions, src
-                # Project exists but no matching version; in auto mode try next source.
-                if source != "auto":
-                    break
-            except SystemExit as e:
-                last_error = e
-                if source != "auto":
-                    raise
-                continue
-        if last_error:
-            raise last_error
+    def _resolve_mod(self, slug, mc_version, loader):
+        project = self.modrinth.get_project(slug)
+        versions = self.modrinth.get_versions(project["id"], loader=loader,
+                                              game_version=mc_version)
+        if versions:
+            return project, versions
         extra = f" for MC {mc_version}"
         extra += f" ({loader})" if loader else ""
         if not loader:
@@ -2151,7 +1951,7 @@ def _parse_ram(value):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Simple Minecraft CLI Launcher — Microsoft + offline + Fabric/Forge/NeoForge + Modrinth/CurseForge mods",
+        description="Simple Minecraft CLI Launcher — Microsoft + offline + Fabric/Forge/NeoForge + Modrinth mods",
         epilog="Examples:\n"
                "  %(prog)s login                       # Microsoft login (browser, default)\n"
                "  %(prog)s login --device-code         # Device code login (requires custom Azure app)\n"
@@ -2168,13 +1968,11 @@ def main():
                "  %(prog)s download --threads 16           # 16-thread download\n"
                "  %(prog)s list-versions               # List all Minecraft versions\n"
                "  %(prog)s list-loaders                # List all mod loaders\n"
-               "  %(prog)s search sodium               # Search mods (Modrinth first, then CurseForge)\n"
-               "  %(prog)s search sodium --source curseforge  # Search only CurseForge\n"
+               "  %(prog)s search sodium               # Search mods on Modrinth\n"
                "  %(prog)s install-fabric -v 1.21.4    # Install Fabric loader\n"
                "  %(prog)s install-forge -v 1.20.1     # Install Forge loader\n"
                "  %(prog)s install-neoforge -v 1.21.4  # Install NeoForge loader\n"
                "  %(prog)s install-mod sodium -v 1.21.4     # Install a mod\n"
-               "  %(prog)s install-mod sodium -v 1.21.4 --source curseforge\n"
                "  %(prog)s list-installed              # List locally installed versions\n"
                "  %(prog)s list-mods -v 1.21.4         # List mods for a version\n"
                "  %(prog)s disable-mod sodium -v 1.21.4     # Disable a mod\n"
@@ -2202,11 +2000,6 @@ def main():
                         help="Specific loader version ID to install")
     parser.add_argument("--mod-version", default=None,
                         help="Specific mod version ID to install")
-    parser.add_argument("--source", default="auto",
-                        choices=["auto", "modrinth", "curseforge"],
-                        help="Mod source for search/install (default: auto = Modrinth first, then CurseForge)")
-    parser.add_argument("--curseforge-key", default=None,
-                        help="CurseForge API key (or set CURSEFORGE_API_KEY env variable)")
     parser.add_argument("--limit", type=int, default=10,
                         help="Max search results (default: 10)")
     parser.add_argument("--dir", "-d", default=str(DEFAULT_DIR),
@@ -2427,10 +2220,9 @@ def main():
         query = args.query
         if not query:
             log.die("Please provide a search query.\n  Example: python mc_launcher.py search sodium")
-        source_label = args.source if args.source != "auto" else "Modrinth first, then CurseForge"
-        log.header(f"Searching for: {query} (source: {source_label})")
-        mm = ModManager(game_dir, curseforge_key=args.curseforge_key)
-        hits = mm.search(query, limit=args.limit, source=args.source,
+        log.header(f"Searching for: {query} (source: modrinth)")
+        mm = ModManager(game_dir)
+        hits = mm.search(query, limit=args.limit,
                          game_version=args.version, loader=args.loader)
         if not hits:
             log.warn("No results found.")
@@ -2526,13 +2318,12 @@ def main():
             log.info(f"Auto-detected version: {mc_version}")
         log.header(f"Install Mod for MC {mc_version}")
 
-        mm = ModManager(game_dir, curseforge_key=args.curseforge_key)
+        mm = ModManager(game_dir)
         paths, version_data, project = mm.install(
             slug,
             mc_version=mc_version,
             loader=args.loader,
             version_id=args.mod_version,
-            source=args.source,
         )
 
         title = project.get("title", slug)

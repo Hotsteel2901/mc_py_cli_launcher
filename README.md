@@ -1,13 +1,13 @@
 # MC CLI Launcher
 
-一个简洁的 Minecraft 命令行启动器，支持 Microsoft 登录、离线模式、Fabric / Forge / NeoForge 加载器，以及 Modrinth / CurseForge 双模组源。
+一个简洁的 Minecraft 命令行启动器，支持 Microsoft 登录、离线模式、Fabric / Forge / NeoForge 加载器，以及 Modrinth 模组源。
 
 ## 功能
 
-- **Microsoft 设备码登录** — 一行命令，无需复制粘贴 URL
+- **Microsoft 浏览器登录** — 默认方式，复制粘贴 URL 即可完成登录
 - **离线模式** — 无需正版账号即可本地启动
 - **多加载器支持** — Fabric、Forge、NeoForge 可选安装、并列独立
-- **双模组源** — Modrinth 优先，未找到时自动回退 CurseForge；也可手动指定 `--source`
+- **Modrinth 模组源** — 搜索与安装，无需 API Key
 - **游戏启动** — 版本管理、Java 检测、内存配置、窗口分辨率
 - **多线程下载** — 带进度条和 SHA-1 校验
 
@@ -57,20 +57,12 @@
 ### 3. 搜索模组
 
 ```bash
-# 默认：Modrinth 优先，无结果回退 CurseForge
+# 搜索 Modrinth 上的模组
 ./mc_launcher search sodium
-
-# 只搜索 Modrinth
-./mc_launcher search sodium --source modrinth
-
-# 只搜索 CurseForge（需要提供 API Key）
-./mc_launcher search jei --source curseforge --curseforge-key YOUR_KEY
 
 # 限制返回数量
 ./mc_launcher search iris --limit 5
 ```
-
-> CurseForge API Key 也可通过环境变量 `CURSEFORGE_API_KEY` 设置。
 
 ### 4. 安装模组
 
@@ -83,9 +75,6 @@
 
 # 指定模组版本
 ./mc_launcher install-mod sodium -v 1.21.4 --mod-version xxxxxxxx
-
-# 从 CurseForge 安装
-./mc_launcher install-mod jei -v 1.20.1 --source curseforge --curseforge-key YOUR_KEY
 ```
 
 ### 5. 启动游戏

@@ -359,7 +359,7 @@ footer a:hover{color:var(--green)}
   <div class="logo">MC CLI Launcher<span class="cursor"></span></div>
   <p class="subtitle">
     Minecraft 命令行启动器<br>
-    <em>设备码登录</em> · Fabric / Forge / NeoForge · Modrinth + CurseForge
+    <em>浏览器登录</em> · Fabric / Forge / NeoForge · Modrinth
   </p>
   <a href="https://github.com/Hotsteel2901/mc_py_cli_launcher" class="btn-primary">View on GitHub</a>
 </header>
@@ -370,8 +370,8 @@ footer a:hover{color:var(--green)}
   <div class="features-grid">
     <div class="feature-card">
       <div class="feature-label">Auth</div>
-      <div class="feature-title">设备码登录</div>
-      <div class="feature-desc">一行命令登录 Microsoft 账号，无需复制粘贴 URL</div>
+      <div class="feature-title">浏览器登录</div>
+      <div class="feature-desc">默认浏览器登录 Microsoft 账号，复制粘贴 URL 即可</div>
     </div>
     <div class="feature-card">
       <div class="feature-label">Loader</div>
@@ -380,8 +380,8 @@ footer a:hover{color:var(--green)}
     </div>
     <div class="feature-card">
       <div class="feature-label">Mods</div>
-      <div class="feature-title">Modrinth + CurseForge</div>
-      <div class="feature-desc">默认 Modrinth 优先并自动回退 CurseForge，也可手动指定源</div>
+      <div class="feature-title">Modrinth</div>
+      <div class="feature-desc">搜索与安装模组，无需 API Key，开箱即用</div>
     </div>
     <div class="feature-card">
       <div class="feature-label">Download</div>
@@ -435,9 +435,9 @@ footer a:hover{color:var(--green)}
       <span class="prompt">$ </span><span class="cmd">./mc_launcher install-forge</span> <span class="flag">-v 1.20.1</span>
       <span class="prompt">$ </span><span class="cmd">./mc_launcher install-neoforge</span> <span class="flag">-v 1.21.4</span>
       <span class="blank"></span>
-      <span class="comment"># 搜索模组（Modrinth 优先，自动回退 CurseForge）</span>
+      <span class="comment"># 搜索模组（Modrinth）</span>
       <span class="prompt">$ </span><span class="cmd">./mc_launcher search sodium</span>
-      <span class="prompt">$ </span><span class="cmd">./mc_launcher search jei</span> <span class="flag">--source curseforge --curseforge-key YOUR_KEY</span>
+      <span class="prompt">$ </span><span class="cmd">./mc_launcher search iris</span> <span class="flag">--limit 5</span>
       <span class="blank"></span>
       <span class="comment"># 安装并启动</span>
       <span class="prompt">$ </span><span class="cmd">./mc_launcher install-mod sodium</span> <span class="flag">-v 1.21.4</span>
