@@ -810,8 +810,17 @@ class ModManager:
         if loader:
             log.info(f"Using loader: {loader}")
 
+        return self._install_with_deps(slug, mc_version, loader, version_id, set())
+
+    def _install_with_deps(self, slug, mc_version, loader, version_id, installing):
+        if slug in installing:
+            log.warn(f"Circular dependency detected, skipping: {slug}")
+            return None, None, None
+        installing = installing | {slug}
+
         project, versions = self._resolve_mod(slug, mc_version, loader)
         proj_title = project.get("title", slug)
+        proj_id = project.get("id")
 
         if version_id:
             target = None
@@ -838,6 +847,24 @@ class ModManager:
         log.info(f"Installing {proj_title} {ver_num} (MC: {mc_str}, Loaders: {loaders_str})...")
 
         dest_dir = self._mods_dir(mc_version)
+
+        required_deps = [d for d in target.get("dependencies", [])
+                         if d.get("dependency_type") == "required" and d.get("project_id")]
+        for dep in required_deps:
+            dep_pid = dep["project_id"]
+            dep_proj = self.modrinth.get_project(dep_pid)
+            dep_slug = dep_proj.get("slug", dep_pid)
+            dep_title = dep_proj.get("title", dep_slug)
+            existing = sorted(dest_dir.glob("*.jar"))
+            already = any(dep_slug.lower() in f.name.lower() or
+                          dep_title.lower().replace(" ", "_") in f.name.lower()
+                          for f in existing if not f.name.endswith(("-sources.jar", "-javadoc.jar", ".disabled")))
+            if already:
+                log.info(f"Dependency already present: {dep_title}")
+                continue
+            log.info(f"Installing required dependency: {dep_title}...")
+            self._install_with_deps(dep_pid, mc_version, loader, None, installing)
+
         paths = self.modrinth.download(target, dest_dir, f"{proj_title} {ver_num}")
         total_size = sum(p.stat().st_size for p in paths if p.exists())
         log.success(f"Installed {len(paths)} file(s) ({total_size / 1024:.1f} KB) -> {dest_dir}")
