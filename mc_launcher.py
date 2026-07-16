@@ -810,17 +810,8 @@ class ModManager:
         if loader:
             log.info(f"Using loader: {loader}")
 
-        return self._install_with_deps(slug, mc_version, loader, version_id, set())
-
-    def _install_with_deps(self, slug, mc_version, loader, version_id, installing):
-        if slug in installing:
-            log.warn(f"Circular dependency detected, skipping: {slug}")
-            return None, None, None
-        installing = installing | {slug}
-
         project, versions = self._resolve_mod(slug, mc_version, loader)
         proj_title = project.get("title", slug)
-        proj_id = project.get("id")
 
         if version_id:
             target = None
@@ -846,29 +837,86 @@ class ModManager:
             log.warn(f"Note: selected version uses loader '{loaders_str}', not '{loader}'")
         log.info(f"Installing {proj_title} {ver_num} (MC: {mc_str}, Loaders: {loaders_str})...")
 
+        self._check_dependencies(target, mc_version, loader)
+
         dest_dir = self._mods_dir(mc_version)
-
-        required_deps = [d for d in target.get("dependencies", [])
-                         if d.get("dependency_type") == "required" and d.get("project_id")]
-        for dep in required_deps:
-            dep_pid = dep["project_id"]
-            dep_proj = self.modrinth.get_project(dep_pid)
-            dep_slug = dep_proj.get("slug", dep_pid)
-            dep_title = dep_proj.get("title", dep_slug)
-            existing = sorted(dest_dir.glob("*.jar"))
-            already = any(dep_slug.lower() in f.name.lower() or
-                          dep_title.lower().replace(" ", "_") in f.name.lower()
-                          for f in existing if not f.name.endswith(("-sources.jar", "-javadoc.jar", ".disabled")))
-            if already:
-                log.info(f"Dependency already present: {dep_title}")
-                continue
-            log.info(f"Installing required dependency: {dep_title}...")
-            self._install_with_deps(dep_pid, mc_version, loader, None, installing)
-
         paths = self.modrinth.download(target, dest_dir, f"{proj_title} {ver_num}")
         total_size = sum(p.stat().st_size for p in paths if p.exists())
         log.success(f"Installed {len(paths)} file(s) ({total_size / 1024:.1f} KB) -> {dest_dir}")
         return paths, target, project
+
+    def _check_dependencies(self, version_data, mc_version, loader):
+        """检测模组依赖并醒目打印，提醒用户手动安装缺失的 required 依赖。"""
+        deps = [d for d in version_data.get("dependencies", []) if d.get("project_id")]
+        if not deps:
+            return
+
+        dest_dir = self._mods_dir(mc_version)
+        existing_jars = [f.name.lower() for f in dest_dir.glob("*.jar")
+                         if not f.name.endswith(("-sources.jar", "-javadoc.jar", ".disabled"))]
+
+        required_missing = []
+        optional_list = []
+        for dep in deps:
+            dep_pid = dep["project_id"]
+            dep_type = dep.get("dependency_type", "required")
+            try:
+                dep_proj = self.modrinth.get_project(dep_pid)
+            except Exception as e:
+                log.warn(f"Could not resolve dependency {dep_pid}: {e}")
+                continue
+            dep_title = dep_proj.get("title", dep_pid)
+            dep_slug = dep_proj.get("slug", dep_pid)
+
+            dep_versions = self.modrinth.get_versions(dep_pid, loader=loader,
+                                                      game_version=mc_version)
+            if dep_versions:
+                def _dk(v):
+                    loaders = [l.lower() for l in v.get("loaders", [])]
+                    lm = 0 if loader and loader.lower() in loaders else 1
+                    return (lm, v.get("date_published", ""))
+                dep_versions.sort(key=_dk)
+                dep_ver_num = dep_versions[0].get("version_number", dep_versions[0]["id"])
+                dep_mc = ", ".join(dep_versions[0].get("game_versions", ["?"]))
+            else:
+                dep_ver_num = "(no matching version)"
+                dep_mc = "?"
+
+            dep_key_lower = dep_slug.lower()
+            dep_title_lower = dep_title.lower().replace(" ", "_")
+            present = any(dep_key_lower in n or dep_title_lower in n
+                          for n in existing_jars)
+
+            if dep_type == "required":
+                if present:
+                    log.info(f"[dep: required] {dep_title} — already installed")
+                else:
+                    required_missing.append((dep_title, dep_slug, dep_ver_num, dep_mc))
+            else:
+                optional_list.append((dep_title, dep_slug, dep_ver_num, dep_mc, present))
+
+        if required_missing or optional_list:
+            print()
+            log.header("Dependencies")
+            if required_missing:
+                print(f"  {_Log.BOLD}{_Log.RED}Required dependencies (MUST install manually):{_Log.RESET}")
+                for title, slug, ver, mc in required_missing:
+                    print(f"    {_Log.RED}- {title}{_Log.RESET}")
+                    print(f"      slug:    {slug}")
+                    print(f"      version: {ver}  (MC: {mc})")
+                    print(f"      install: python mc_launcher.py install-mod {slug} -v {mc_version}" +
+                          (f" --loader {loader}" if loader else ""))
+            if optional_list:
+                print(f"  {_Log.YELLOW}Optional dependencies:{_Log.RESET}")
+                for title, slug, ver, mc, present in optional_list:
+                    mark = f"{_Log.GREEN}[installed]{_Log.RESET} " if present else ""
+                    print(f"    {mark}{title}")
+                    print(f"      slug: {slug} | version: {ver} | MC: {mc}")
+            print()
+            if required_missing:
+                log.warn(f"{len(required_missing)} required dependency(ies) missing. "
+                         f"Install them first, or the mod may not load.")
+            print()
 
     def _resolve_mod(self, slug, mc_version, loader):
         project = self.modrinth.get_project(slug)
