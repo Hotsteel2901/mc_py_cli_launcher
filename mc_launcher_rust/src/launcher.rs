@@ -457,7 +457,7 @@ impl MinecraftLauncher {
                     serde_json::Value::String(s) => jvm_args.push(s.clone()),
                     serde_json::Value::Object(obj) => {
                         if let Some(rules) = obj.get("rules") {
-                            if !VersionManager::rules_allow(rules, true) {
+                            if !VersionManager::rules_allow(rules, false) {
                                 continue;
                             }
                         }
@@ -522,7 +522,7 @@ impl MinecraftLauncher {
                         }
                         serde_json::Value::Object(obj) => {
                             if let Some(rules) = obj.get("rules") {
-                                if !VersionManager::rules_allow(rules, true) {
+                                if !VersionManager::rules_allow(rules, false) {
                                     continue;
                                 }
                             }
@@ -559,7 +559,7 @@ impl MinecraftLauncher {
                     }
                     serde_json::Value::Object(obj) => {
                         if let Some(rules) = obj.get("rules") {
-                            if !VersionManager::rules_allow(rules, true) {
+                            if !VersionManager::rules_allow(rules, false) {
                                 continue;
                             }
                         }
@@ -596,7 +596,7 @@ impl MinecraftLauncher {
                         }
                         serde_json::Value::Object(obj) => {
                             if let Some(rules) = obj.get("rules") {
-                                if !VersionManager::rules_allow(rules, true) {
+                                if !VersionManager::rules_allow(rules, false) {
                                     continue;
                                 }
                             }
