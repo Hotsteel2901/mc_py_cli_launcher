@@ -32,5 +32,9 @@ Thumbs.db
 # PyInstaller output
 *.manifest
 
+# Rust
+target/
+**/target/
+
 # AI assistant context
 CLAUDE.md

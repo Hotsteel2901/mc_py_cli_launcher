@@ -1,0 +1,642 @@
+//! Minecraft version management — manifest, client jar, libraries, assets, natives.
+
+use std::fs;
+use std::io::Read;
+use std::path::{Path, PathBuf};
+use std::time::SystemTime;
+
+use rayon::prelude::*;
+
+use crate::http;
+use crate::util;
+
+const MC_MANIFEST: &str =
+    "https://launchermeta.mojang.com/mc/game/version_manifest_v2.json";
+
+pub struct VersionManager {
+    pub game_dir: PathBuf,
+    pub versions_dir: PathBuf,
+    pub libraries_dir: PathBuf,
+    pub assets_dir: PathBuf,
+}
+
+impl VersionManager {
+    pub fn new(game_dir: &Path) -> Self {
+        VersionManager {
+            game_dir: game_dir.to_path_buf(),
+            versions_dir: game_dir.join("versions"),
+            libraries_dir: game_dir.join("libraries"),
+            assets_dir: game_dir.join("assets"),
+        }
+    }
+
+    /// Fetch (or use cached) Minecraft version manifest.
+    pub fn fetch_manifest(&self) -> serde_json::Value {
+        let manifest_path = self.game_dir.join("version_manifest_v2.json");
+
+        // Use cache if less than 5 minutes old
+        if manifest_path.exists() {
+            if let Ok(meta) = fs::metadata(&manifest_path) {
+                if let Ok(mod_time) = meta.modified() {
+                    if let Ok(elapsed) = SystemTime::now().duration_since(mod_time) {
+                        if elapsed.as_secs() < 300 {
+                            if let Ok(data) = fs::read_to_string(&manifest_path) {
+                                if let Ok(json) = serde_json::from_str(&data) {
+                                    return json;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        let (status, body) = http::http_get(MC_MANIFEST).unwrap_or_else(|e| {
+            crate::die!(format!("Cannot fetch version manifest: {}", e));
+        });
+        if status != 200 {
+            let hint = String::from_utf8_lossy(&body)
+                .chars()
+                .take(300)
+                .collect::<String>();
+            crate::die!(format!("Cannot fetch version manifest ({})", status), &hint);
+        }
+
+        fs::create_dir_all(&self.game_dir).ok();
+        fs::write(&manifest_path, &body).ok();
+        serde_json::from_slice(&body).unwrap()
+    }
+
+    /// Get version info for a specific version ID (or "latest" / "latest-snapshot").
+    pub fn get_version_info(
+        &self,
+        version_id: Option<&str>,
+    ) -> (String, serde_json::Value) {
+        let manifest = self.fetch_manifest();
+        let mut vid = version_id.unwrap_or("latest").to_string();
+
+        if vid == "latest" {
+            vid = manifest["latest"]["release"].as_str().unwrap_or("").to_string();
+        } else if vid == "latest-snapshot" {
+            vid = manifest["latest"]["snapshot"].as_str().unwrap_or("").to_string();
+        }
+
+        let entry = manifest["versions"]
+            .as_array()
+            .and_then(|versions| versions.iter().find(|v| v["id"].as_str() == Some(&vid)));
+
+        let entry = match entry {
+            Some(e) => e,
+            None => {
+                let avail: Vec<_> = manifest["versions"]
+                    .as_array()
+                    .map(|arr| {
+                        arr.iter()
+                            .take(15)
+                            .filter_map(|v| v["id"].as_str())
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+
+                let hint = format!("Available (Mojang): {}...", avail.join(", "));
+                crate::die!(format!("Version '{}' not found.", vid), &hint);
+            }
+        };
+
+        let json_path = self.versions_dir.join(&vid).join(format!("{}.json", vid));
+        if !json_path.exists() {
+            crate::info!("Downloading version manifest for {}...", vid);
+            http::download_file(
+                entry["url"].as_str().unwrap_or(""),
+                &json_path,
+                &format!("{}.json", vid),
+                None,
+                3,
+                true,
+            );
+        }
+
+        let version_data: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&json_path).unwrap()).unwrap();
+        (vid, version_data)
+    }
+
+    /// Download the client JAR for a version.
+    pub fn download_client_jar(
+        &self,
+        version_id: &str,
+        version_data: &serde_json::Value,
+    ) -> PathBuf {
+        let jar_path = self
+            .versions_dir
+            .join(version_id)
+            .join(format!("{}.jar", version_id));
+        if jar_path.exists() {
+            return jar_path;
+        }
+        let url = version_data["downloads"]["client"]["url"]
+            .as_str()
+            .unwrap_or("");
+        let sha1 = version_data["downloads"]["client"]["sha1"]
+            .as_str()
+            .unwrap_or("");
+        crate::info!("Downloading client jar for {}...", version_id);
+        http::download_file(
+            url,
+            &jar_path,
+            &format!("{}.jar", version_id),
+            Some(sha1),
+            3,
+            true,
+        );
+        jar_path
+    }
+
+    /// Determine if a native library classifier matches current OS/arch.
+    fn needs_natives(&self, _lib_name: &str, classifiers: &[String]) -> Option<String> {
+        let osn = util::os_name();
+        let arch = util::os_arch();
+
+        for c in classifiers {
+            let cl = c.to_lowercase();
+            match osn {
+                "windows" if cl.contains("windows") => {
+                    if arch == "x86_64" && cl.contains("64") {
+                        return Some(c.clone());
+                    }
+                    if arch == "arm64" && cl.contains("arm64") {
+                        return Some(c.clone());
+                    }
+                    if !cl.contains("64") && !cl.contains("arm64") && !cl.contains("32") {
+                        return Some(c.clone());
+                    }
+                }
+                "linux" if cl.contains("linux") => {
+                    if arch == "arm64" && cl.contains("arm64") {
+                        return Some(c.clone());
+                    }
+                    if arch == "x86_64" && !cl.contains("arm64") && !cl.contains("32") {
+                        return Some(c.clone());
+                    }
+                }
+                "osx" if cl.contains("osx") || cl.contains("macos") => {
+                    if arch == "arm64" && cl.contains("arm64") {
+                        return Some(c.clone());
+                    }
+                    if arch == "x86_64" && !cl.contains("arm64") {
+                        return Some(c.clone());
+                    }
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+
+    /// Evaluate library rules to determine if a library should be included.
+    pub fn rules_allow(rules: &serde_json::Value, default: bool) -> bool {
+        let arr = match rules.as_array() {
+            Some(a) => a,
+            None => return default,
+        };
+        let mut allowed = default;
+        for rule in arr {
+            let action = rule["action"].as_str().unwrap_or("allow");
+            let mut matches = true;
+
+            if let Some(os_rule) = rule.get("os") {
+                matches = true;
+                if let Some(name) = os_rule["name"].as_str() {
+                    if name != util::os_name() {
+                        matches = false;
+                    }
+                }
+                if matches {
+                    if let Some(arch) = os_rule["arch"].as_str() {
+                        if arch != util::os_arch() {
+                            matches = false;
+                        }
+                    }
+                }
+            } else if rule.get("features").is_some() {
+                // Features rules — skip for now
+                matches = false;
+            }
+
+            if matches {
+                allowed = action == "allow";
+            }
+        }
+        allowed
+    }
+
+    /// Download all libraries and extract native libraries.
+    /// Returns paths to all JAR files for the classpath.
+    pub fn download_libraries(
+        &self,
+        version_data: &serde_json::Value,
+        natives_dir: &Path,
+        max_workers: usize,
+    ) -> Vec<PathBuf> {
+        let libs = version_data["libraries"].as_array();
+        if libs.is_none() {
+            return Vec::new();
+        }
+        let libs = libs.unwrap();
+        let osn = util::os_name();
+
+        let mut all_downloads: Vec<(String, PathBuf, String)> = Vec::new();
+        let mut all_jars: Vec<PathBuf> = Vec::new();
+
+        for lib in libs {
+            let name = lib["name"].as_str().unwrap_or("");
+            if name.is_empty() {
+                continue;
+            }
+
+            let parts: Vec<&str> = name.split(':').collect();
+            if parts.len() < 3 {
+                continue;
+            }
+            let (group, artifact, version) = (parts[0], parts[1], parts[2]);
+            let classifier = parts.get(3).copied();
+
+            let group_path = group.replace('.', "/");
+            let lib_dir = self
+                .libraries_dir
+                .join(&group_path)
+                .join(artifact)
+                .join(version);
+
+            let jar_name = if let Some(cls) = classifier {
+                format!("{}-{}-{}.jar", artifact, version, cls)
+            } else {
+                format!("{}-{}.jar", artifact, version)
+            };
+
+            // Check rules
+            if let Some(rules) = lib.get("rules") {
+                if !Self::rules_allow(rules, true) {
+                    continue;
+                }
+            }
+
+            let is_native_by_name =
+                classifier.map_or(false, |c| c.contains("natives-"));
+            let label_suffix = if is_native_by_name { " [native]" } else { "" };
+
+            // Main artifact
+            if let Some(artifact_info) = lib["downloads"].get("artifact") {
+                let jar_path = lib_dir.join(&jar_name);
+                if !jar_path.exists() {
+                    let url = artifact_info["url"].as_str().unwrap_or("");
+                    all_downloads.push((
+                        url.to_string(),
+                        jar_path.clone(),
+                        format!("{}:{}:{}", group, artifact, label_suffix),
+                    ));
+                }
+                all_jars.push(jar_path);
+            } else {
+                let jar_path = lib_dir.join(&jar_name);
+                if !jar_path.exists() {
+                    let url = format!(
+                        "https://libraries.minecraft.net/{}/{}/{}/{}",
+                        group_path, artifact, version, jar_name
+                    );
+                    all_downloads.push((
+                        url,
+                        jar_path.clone(),
+                        format!("{}:{}:{}", group, artifact, label_suffix),
+                    ));
+                }
+                all_jars.push(jar_path);
+            }
+
+            // Native classifiers
+            if let Some(natives) = lib.get("natives") {
+                if let Some(native_key) = natives[osn].as_str() {
+                    let _native_key = native_key.replace("${arch}", util::os_arch());
+                    if let Some(classifiers) =
+                        lib["downloads"].get("classifiers")
+                    {
+                        let classifier_keys: Vec<String> = classifiers
+                            .as_object()
+                            .map(|obj| obj.keys().cloned().collect())
+                            .unwrap_or_default();
+                        let match_key =
+                            self.needs_natives(name, &classifier_keys);
+                        if let Some(mk) = match_key {
+                            if let Some(nc) = classifiers.get(&mk) {
+                                let native_jar = lib_dir.join(format!(
+                                    "{}-{}-{}.jar",
+                                    artifact, version, mk
+                                ));
+                                if !native_jar.exists() {
+                                    let url = nc["url"].as_str().unwrap_or("");
+                                    all_downloads.push((
+                                        url.to_string(),
+                                        native_jar.clone(),
+                                        format!(
+                                            "{}:{} [native]",
+                                            group, artifact
+                                        ),
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        let new_count = all_downloads.len();
+        crate::info!(
+            "Libraries: {} total, {} to download [{} threads]...",
+            all_jars.len(),
+            new_count,
+            max_workers
+        );
+
+        if !all_downloads.is_empty() {
+            let total = all_downloads.len();
+            let done = std::sync::atomic::AtomicUsize::new(0);
+
+            all_downloads.par_iter().for_each(|(url, dest, label)| {
+                if dest.exists() {
+                    done.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    return;
+                }
+                let ok = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    http::download_file(url, dest, label, None, 2, false);
+                    true
+                }))
+                .is_ok();
+                let n = done.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                let pct = n * 100 / total;
+                let filled = pct * 25 / 100;
+                let bar: String = (0..25)
+                    .map(|i| {
+                        if i < filled { '\u{2588}' } else { '\u{2591}' }
+                    })
+                    .collect();
+                print!(
+                    "\r  [{:3}%] {} {}/{} libs",
+                    pct, bar, n, total
+                );
+                use std::io::Write;
+                std::io::stdout().flush().ok();
+                if !ok {
+                    println!("\n    FAILED: {}", label);
+                }
+            });
+
+            let bar_done: String = (0..25).map(|_| '\u{2588}').collect();
+            println!(
+                "\r  [100%] {} {}/{} libs -- done    ",
+                bar_done, total, total
+            );
+        }
+
+        // Extract natives from downloaded jars
+        for (_url, dest, label) in &all_downloads {
+            if (label.contains("[native]") || label.contains("natives-"))
+                && dest.exists()
+            {
+                self.extract_natives(dest, natives_dir);
+            }
+        }
+
+        // Also check any cached native jars
+        let mut seen: std::collections::HashSet<PathBuf> =
+            all_downloads.iter().map(|(_, d, _)| d.clone()).collect();
+
+        for lib in libs {
+            if let Some(rules) = lib.get("rules") {
+                if !Self::rules_allow(rules, true) {
+                    continue;
+                }
+            }
+            let name = lib["name"].as_str().unwrap_or("");
+            let parts: Vec<&str> = name.split(':').collect();
+            if parts.len() < 3 {
+                continue;
+            }
+            let (group, artifact, version) = (parts[0], parts[1], parts[2]);
+            let classifier = parts.get(3).copied();
+            let is_native_new =
+                classifier.map_or(false, |c| c.contains("natives-"));
+            let group_path = group.replace('.', "/");
+            let lib_dir = self
+                .libraries_dir
+                .join(&group_path)
+                .join(artifact)
+                .join(version);
+
+            if is_native_new {
+                if let Some(cls) = classifier {
+                    let jar_name =
+                        format!("{}-{}-{}.jar", artifact, version, cls);
+                    let cached = lib_dir.join(&jar_name);
+                    if !seen.contains(&cached) && cached.exists() {
+                        self.extract_natives(&cached, natives_dir);
+                        seen.insert(cached);
+                    }
+                }
+            }
+
+            if let Some(natives) = lib.get("natives") {
+                if let Some(native_key) = natives[util::os_name()].as_str() {
+                    let _native_key =
+                        native_key.replace("${arch}", util::os_arch());
+                    if let Some(classifiers) =
+                        lib["downloads"].get("classifiers")
+                    {
+                        let classifier_keys: Vec<String> = classifiers
+                            .as_object()
+                            .map(|obj| obj.keys().cloned().collect())
+                            .unwrap_or_default();
+                        let match_key =
+                            self.needs_natives(name, &classifier_keys);
+                        if let Some(mk) = match_key {
+                            if classifiers.get(&mk).is_some() {
+                                let cached = lib_dir.join(format!(
+                                    "{}-{}-{}.jar",
+                                    artifact, version, mk
+                                ));
+                                if !seen.contains(&cached) && cached.exists()
+                                {
+                                    self.extract_natives(&cached, natives_dir);
+                                    seen.insert(cached);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        all_jars
+    }
+
+    /// Extract native libraries (dll, so, dylib) from a JAR file.
+    pub fn extract_natives(&self, jar_path: &Path, natives_dir: &Path) {
+        fs::create_dir_all(natives_dir).ok();
+        let file = match fs::File::open(jar_path) {
+            Ok(f) => f,
+            Err(_) => return,
+        };
+        let mut archive = match zip::ZipArchive::new(file) {
+            Ok(a) => a,
+            Err(e) => {
+                crate::warn_msg!(
+                    "Failed to extract natives from {}: {}",
+                    jar_path.display(),
+                    e
+                );
+                return;
+            }
+        };
+
+        for i in 0..archive.len() {
+            let mut entry = match archive.by_index(i) {
+                Ok(e) => e,
+                Err(_) => continue,
+            };
+            let name = entry
+                .name()
+                .split('/')
+                .last()
+                .unwrap_or("")
+                .to_string();
+            if name.is_empty() {
+                continue;
+            }
+            let ext = name
+                .rsplitn(2, '.')
+                .next()
+                .unwrap_or("")
+                .to_lowercase();
+            if matches!(ext.as_str(), "dll" | "so" | "dylib" | "jnilib") {
+                let target = natives_dir.join(&name);
+                if !target.exists() {
+                    let mut buf = Vec::new();
+                    if entry.read_to_end(&mut buf).is_ok() {
+                        fs::write(&target, &buf).ok();
+                    }
+                }
+            }
+        }
+    }
+
+    /// Download game assets.
+    pub fn download_assets(
+        &self,
+        version_data: &serde_json::Value,
+        max_workers: usize,
+    ) -> String {
+        let asset_index = &version_data["assetIndex"];
+        if asset_index.is_null() {
+            return version_data["assets"]
+                .as_str()
+                .unwrap_or("legacy")
+                .to_string();
+        }
+
+        let index_id = asset_index["id"].as_str().unwrap_or("");
+        let index_path = self
+            .assets_dir
+            .join("indexes")
+            .join(format!("{}.json", index_id));
+
+        if !index_path.exists() {
+            let url = asset_index["url"].as_str().unwrap_or("");
+            http::download_file(
+                url,
+                &index_path,
+                &format!("Asset index {}", index_id),
+                None,
+                3,
+                true,
+            );
+        }
+
+        let index_data: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&index_path).unwrap())
+                .unwrap();
+        let objects = index_data["objects"].as_object();
+        if objects.is_none() {
+            return index_id.to_string();
+        }
+        let objects = objects.unwrap();
+        let total = objects.len();
+
+        let mut missing: Vec<(String, PathBuf)> = Vec::new();
+        for (_name, obj) in objects {
+            let h = obj["hash"].as_str().unwrap_or("");
+            let sub_dir = &h[..2];
+            let obj_path = self.assets_dir.join("objects").join(sub_dir).join(h);
+            if !obj_path.exists() {
+                let url = format!(
+                    "https://resources.download.minecraft.net/{}/{}",
+                    sub_dir, h
+                );
+                missing.push((url, obj_path));
+            }
+        }
+
+        if missing.is_empty() {
+            crate::info!("Assets: all {} up to date.", total);
+            return index_id.to_string();
+        }
+
+        crate::info!(
+            "Assets: {}/{} to download [{} threads]...",
+            missing.len(),
+            total,
+            max_workers
+        );
+
+        let total_missing = missing.len();
+        let dl =
+            std::sync::atomic::AtomicUsize::new(0);
+        let fail =
+            std::sync::atomic::AtomicUsize::new(0);
+
+        missing.par_iter().for_each(|(url, dest)| {
+            let ok = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                http::download_file(url, dest, "", None, 2, false);
+                true
+            }))
+            .is_ok();
+            if ok {
+                dl.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            } else {
+                fail.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+            let done = dl.load(std::sync::atomic::Ordering::Relaxed)
+                + fail.load(std::sync::atomic::Ordering::Relaxed);
+            let pct = done * 100 / total_missing;
+            let filled = pct * 25 / 100;
+            let bar: String = (0..25)
+                .map(|i| if i < filled { '\u{2588}' } else { '\u{2591}' })
+                .collect();
+            print!(
+                "\r  [{:3}%] {} {}/{} assets",
+                pct, bar, done, total_missing
+            );
+            use std::io::Write;
+            std::io::stdout().flush().ok();
+        });
+
+        let bar_done: String = (0..25).map(|_| '\u{2588}').collect();
+        let dl_final = dl.load(std::sync::atomic::Ordering::Relaxed);
+        let fail_final = fail.load(std::sync::atomic::Ordering::Relaxed);
+        println!(
+            "\r  [100%] {} {} new, {} failed -- done    ",
+            bar_done, dl_final, fail_final
+        );
+
+        index_id.to_string()
+    }
+}
