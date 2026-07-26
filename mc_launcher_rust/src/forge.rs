@@ -44,8 +44,38 @@ impl ForgeManager {
     }
 
     /// Get available Forge versions for a Minecraft version from Maven metadata.
+    /// Tries BMCLAPI mirror first, falls back to official Maven if mirror data is incomplete.
     pub fn get_available_versions(&self, mc_version: &str) -> AppResult<Vec<String>> {
-        let (status, body) = http::http_get(FORGE_MAVEN_META).map_err(|e| {
+        let prefix = format!("{}-", mc_version);
+
+        // Try BMCLAPI mirror first
+        let versions = Self::fetch_versions_from_url(FORGE_MAVEN_META, &prefix, true);
+        if let Ok(ref v) = versions {
+            if !v.is_empty() {
+                return Ok(v.clone());
+            }
+        }
+
+        // Fall back to official Maven URL (bypass mirror)
+        crate::warn_msg!(
+            "Forge: no {} versions in BMCLAPI mirror, trying official Maven...",
+            mc_version
+        );
+        Self::fetch_versions_from_url(FORGE_MAVEN_META, &prefix, false)
+    }
+
+    fn fetch_versions_from_url(
+        url: &str,
+        prefix: &str,
+        use_mirror: bool,
+    ) -> AppResult<Vec<String>> {
+        let result = if use_mirror {
+            http::http_get(url)
+        } else {
+            http::http_get_no_mirror(url)
+        };
+
+        let (status, body) = result.map_err(|e| {
             AppError::Loader(format!("Forge maven metadata fetch failed: {}", e))
         })?;
         if status != 200 {
@@ -56,7 +86,6 @@ impl ForgeManager {
         }
 
         let text = String::from_utf8_lossy(&body);
-        let prefix = format!("{}-", mc_version);
 
         let metadata: Metadata = quick_xml::de::from_str(&text).map_err(|e| {
             AppError::Xml(format!("Failed to parse Forge maven metadata: {}", e))
@@ -67,7 +96,7 @@ impl ForgeManager {
             .versions
             .version
             .into_iter()
-            .filter(|v| v.starts_with(&prefix))
+            .filter(|v| v.starts_with(prefix))
             .map(|v| v[prefix.len()..].to_string())
             .collect();
 

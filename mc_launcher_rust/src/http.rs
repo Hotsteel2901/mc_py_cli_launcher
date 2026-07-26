@@ -65,7 +65,34 @@ pub fn http_request(
     timeout_secs: u64,
     max_retries: u32,
 ) -> HttpResult {
-    let mirrored = mirror_url(url);
+    http_request_inner(method, url, body_data, json_data, extra_headers, timeout_secs, max_retries, true)
+}
+
+/// Low-level HTTP request without BMCLAPI mirroring (uses original URL directly).
+pub fn http_request_no_mirror(
+    method: &str,
+    url: &str,
+    body_data: Option<&[u8]>,
+    json_data: Option<&serde_json::Value>,
+    extra_headers: Option<&[(&str, &str)]>,
+    timeout_secs: u64,
+    max_retries: u32,
+) -> HttpResult {
+    http_request_inner(method, url, body_data, json_data, extra_headers, timeout_secs, max_retries, false)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn http_request_inner(
+    method: &str,
+    url: &str,
+    body_data: Option<&[u8]>,
+    json_data: Option<&serde_json::Value>,
+    extra_headers: Option<&[(&str, &str)]>,
+    timeout_secs: u64,
+    max_retries: u32,
+    use_mirror: bool,
+) -> HttpResult {
+    let target_url = if use_mirror { mirror_url(url) } else { url.to_string() };
     let mut last_err = String::new();
     let mut last_body: Vec<u8> = Vec::new();
 
@@ -75,8 +102,8 @@ pub fn http_request(
             .build();
 
         let mut req = match method {
-            "POST" => agent.post(&mirrored),
-            _ => agent.get(&mirrored),
+            "POST" => agent.post(&target_url),
+            _ => agent.get(&target_url),
         };
 
         req = req.set(
@@ -156,6 +183,10 @@ pub fn http_get(url: &str) -> HttpResult {
     http_request("GET", url, None, None, None, 30, 3)
 }
 
+pub fn http_get_no_mirror(url: &str) -> HttpResult {
+    http_request_no_mirror("GET", url, None, None, None, 30, 3)
+}
+
 pub fn http_get_hdrs(url: &str, headers: &[(&str, &str)]) -> HttpResult {
     http_request("GET", url, None, None, Some(headers), 30, 3)
 }
@@ -170,6 +201,7 @@ pub fn http_post_form(url: &str, data: &[u8]) -> HttpResult {
 
 /// Download a file with progress bar and optional SHA-1 verification.
 /// Returns Ok(()) on success, or Err with an error message on failure.
+/// Automatically tries BMCLAPI mirror first, falls back to original URL.
 pub fn download_file(
     url: &str,
     dest: &Path,
@@ -206,6 +238,26 @@ pub fn download_file(
     }
 
     let mirrored = mirror_url(url);
+
+    // Try mirrored URL first
+    let result = download_file_inner(&mirrored, dest, &display_label, sha1_expected, max_retries, show_progress);
+    if result.is_ok() || mirrored == url {
+        return result;
+    }
+
+    // Fall back to original URL
+    crate::warn_msg!("Mirror failed for {}, trying official URL...", display_label);
+    download_file_inner(url, dest, &display_label, sha1_expected, 2, show_progress)
+}
+
+fn download_file_inner(
+    url: &str,
+    dest: &Path,
+    display_label: &str,
+    sha1_expected: Option<&str>,
+    max_retries: u32,
+    show_progress: bool,
+) -> Result<(), String> {
     let mut last_err = String::new();
     for attempt in 0..max_retries {
         let agent = ureq::AgentBuilder::new()
@@ -213,7 +265,7 @@ pub fn download_file(
             .build();
 
         match agent
-            .get(&mirrored)
+            .get(url)
             .set(
                 "User-Agent",
                 &format!("{}/{}", LAUNCHER_NAME, LAUNCHER_VER),
@@ -240,7 +292,7 @@ pub fn download_file(
                             )
                             .unwrap(),
                     );
-                    pb.set_message(display_label.clone());
+                    pb.set_message(display_label.to_string());
                     Some(pb)
                 } else {
                     None

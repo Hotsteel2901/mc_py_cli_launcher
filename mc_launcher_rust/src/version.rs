@@ -261,7 +261,7 @@ impl VersionManager {
         let libs = libs.unwrap();
         let osn = util::os_name();
 
-        let mut all_downloads: Vec<(String, PathBuf, String)> = Vec::new();
+        let mut all_downloads: Vec<(String, PathBuf, String, bool)> = Vec::new(); // (url, dest, label, optional)
         let mut all_jars: Vec<PathBuf> = Vec::new();
 
         for lib in libs {
@@ -300,6 +300,7 @@ impl VersionManager {
             let is_native_by_name =
                 classifier.is_some_and(|c| c.contains("natives-"));
             let label_suffix = if is_native_by_name { " [native]" } else { "" };
+            let has_natives = lib.get("natives").is_some();
 
             // Main artifact
             if let Some(artifact_info) = lib["downloads"].get("artifact") {
@@ -310,6 +311,7 @@ impl VersionManager {
                         url.to_string(),
                         jar_path.clone(),
                         format!("{}:{}:{}", group, artifact, label_suffix),
+                        has_natives, // POM-only native libs may have no main artifact
                     ));
                 }
                 all_jars.push(jar_path);
@@ -324,6 +326,7 @@ impl VersionManager {
                         url,
                         jar_path.clone(),
                         format!("{}:{}:{}", group, artifact, label_suffix),
+                        has_natives,
                     ));
                 }
                 all_jars.push(jar_path);
@@ -357,6 +360,7 @@ impl VersionManager {
                                             "{}:{} [native]",
                                             group, artifact
                                         ),
+                                        false, // native classifiers are not optional
                                     ));
                                 }
                             }
@@ -386,14 +390,16 @@ impl VersionManager {
 
             let failed: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
 
-            all_downloads.par_iter().for_each(|(url, dest, label)| {
+            all_downloads.par_iter().for_each(|(url, dest, label, optional)| {
                 if dest.exists() {
                     pb.inc(1);
                     return;
                 }
                 if let Err(e) = http::download_file(url, dest, label, None, 2, false) {
-                    let mut failed = failed.lock().unwrap();
-                    failed.push(format!("{}: {}", label, e));
+                    if !optional {
+                        let mut failed = failed.lock().unwrap();
+                        failed.push(format!("{}: {}", label, e));
+                    }
                 }
                 pb.inc(1);
             });
@@ -411,7 +417,7 @@ impl VersionManager {
         }
 
         // Extract natives from downloaded jars
-        for (_url, dest, label) in &all_downloads {
+        for (_url, dest, label, _optional) in &all_downloads {
             if (label.contains("[native]") || label.contains("natives-"))
                 && dest.exists()
             {
@@ -421,7 +427,7 @@ impl VersionManager {
 
         // Also check any cached native jars
         let mut seen: std::collections::HashSet<PathBuf> =
-            all_downloads.iter().map(|(_, d, _)| d.clone()).collect();
+            all_downloads.iter().map(|(_, d, _, _)| d.clone()).collect();
 
         for lib in libs {
             if let Some(rules) = lib.get("rules") {
