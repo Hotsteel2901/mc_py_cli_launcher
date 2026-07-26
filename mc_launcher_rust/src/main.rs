@@ -27,6 +27,7 @@ use rayon::prelude::*;
 use crate::auth::MicrosoftAuth;
 use crate::fabric::FabricManager;
 use crate::forge::ForgeManager;
+use crate::http::SourceMode;
 use crate::launcher::MinecraftLauncher;
 use crate::mod_manager::ModManager;
 use crate::modrinth as mr;
@@ -135,6 +136,14 @@ fn main() {
                 .action(ArgAction::SetTrue),
         )
         .arg(
+            arg!(--official "Force use official Mojang/Forge URLs (no mirror)")
+                .action(ArgAction::SetTrue),
+        )
+        .arg(
+            arg!(--bmcl "Force use BMCLAPI mirror (大陆用户推荐)")
+                .action(ArgAction::SetTrue),
+        )
+        .arg(
             arg!(--"device-code" "Use device code login")
                 .action(ArgAction::SetTrue),
         )
@@ -179,10 +188,32 @@ fn main() {
     let height = matches.get_one::<u32>("height").copied();
     let no_assets = matches.get_flag("no-assets");
     let device_code = matches.get_flag("device-code");
+    let official_flag = matches.get_flag("official");
+    let bmcl_flag = matches.get_flag("bmcl");
     let fabric_flag = matches.get_flag("fabric");
     let forge_flag = matches.get_flag("forge");
     let neoforge_flag = matches.get_flag("neoforge");
     let limit = *matches.get_one::<u32>("limit").unwrap();
+
+    // Resolve source mode: manual > auto-detect
+    let manual_mode = if official_flag && bmcl_flag {
+        crate::die!("Cannot use both --official and --bmcl.");
+    } else if official_flag {
+        Some(SourceMode::Official)
+    } else if bmcl_flag {
+        Some(SourceMode::BmclApi)
+    } else {
+        None
+    };
+
+    let resolved_mode = http::resolve_source_mode(manual_mode);
+    http::set_source_mode(resolved_mode);
+    let mode_label = match resolved_mode {
+        SourceMode::Official => "official",
+        SourceMode::BmclApi => "BMCLAPI mirror",
+        _ => "auto",
+    };
+    crate::info!("Download source: {} (fallback enabled)", mode_label);
 
     // Normalize alias
     if action == "launch" {
