@@ -137,6 +137,10 @@ fn scan_java_installations() -> Vec<String> {
         r"C:\Program Files\Microsoft",
         r"C:\Program Files\Eclipse Foundation",
         r"C:\Program Files (x86)\Java",
+        r"C:\Program Files\Zulu",
+        r"C:\Program Files\Amazon Corretto",
+        r"C:\Program Files\ojdkbuild",
+        r"C:\tools\java",
     ] {
         let bp = Path::new(base);
         if bp.exists() {
@@ -177,6 +181,7 @@ fn scan_java_installations() -> Vec<String> {
     for base in &[
         "/usr/lib/jvm",
         "/usr/local/opt",
+        "/opt/java",
     ] {
         let bp = Path::new(base);
         if bp.exists() {
@@ -226,6 +231,22 @@ fn scan_java_installations() -> Vec<String> {
         }
     }
 
+    // ASDF
+    let asdf = home.join(".asdf/installs/java");
+    if asdf.exists() {
+        if let Ok(entries) = fs::read_dir(&asdf) {
+            let mut dirs: Vec<_> = entries.flatten().collect();
+            dirs.sort_by_key(|e| e.file_name());
+            dirs.reverse();
+            for d in dirs {
+                let je = d.path().join("bin").join(java_bin);
+                if je.exists() {
+                    scanned.push(je.to_string_lossy().to_string());
+                }
+            }
+        }
+    }
+
     // Homebrew OpenJDK symlink
     let hb = Path::new("/usr/local/opt/openjdk/bin/java");
     if hb.exists() {
@@ -250,10 +271,7 @@ pub fn check_java(required_major: Option<u32>) -> Option<String> {
     }
 
     if candidates.is_empty() {
-        crate::die!(
-            "Java not found. Install Java 17+ from https://adoptium.net/",
-            "If you already installed Java, set JAVA_HOME."
-        );
+        return None;
     }
 
     let java = &candidates[0];
@@ -380,19 +398,15 @@ pub fn download_mojang_java(game_dir: &Path, component: &str, max_workers: usize
     let fail = std::sync::atomic::AtomicUsize::new(0);
 
     downloads.par_iter().for_each(|(url, dest, sha1)| {
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            http::download_file(
-                url,
-                dest,
-                "",
-                sha1.as_deref(),
-                2,
-                false,
-            );
-            true
-        }));
-        match result {
-            Ok(true) => {
+        match http::download_file(
+            url,
+            dest,
+            "",
+            sha1.as_deref(),
+            2,
+            false,
+        ) {
+            Ok(()) => {
                 let n = done.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
                 let f = fail.load(std::sync::atomic::Ordering::Relaxed);
                 let pct = (n + f) * 100 / total;
@@ -407,7 +421,7 @@ pub fn download_mojang_java(game_dir: &Path, component: &str, max_workers: usize
                 use std::io::Write;
                 std::io::stdout().flush().ok();
             }
-            _ => {
+            Err(_) => {
                 fail.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
         }
@@ -453,7 +467,7 @@ pub fn download_mojang_java(game_dir: &Path, component: &str, max_workers: usize
 fn find_java_in_dir(root: &Path, exe_name: &str) -> Option<String> {
     let pattern = format!("{}/**/bin/{}", root.display(), exe_name);
     let matches = glob::glob(&pattern).ok()?;
-    for entry in matches.flatten() {
+    if let Some(entry) = matches.flatten().next() {
         return Some(entry.to_string_lossy().to_string());
     }
     None

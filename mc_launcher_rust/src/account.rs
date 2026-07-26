@@ -7,6 +7,18 @@ use crate::util;
 
 const ACCOUNTS_FILE: &str = "launcher_accounts.json";
 
+fn get_secret(key: &str) -> Option<String> {
+    keyring::Entry::new("mc-launcher", key)
+        .ok()
+        .and_then(|entry| entry.get_password().ok())
+}
+
+fn set_secret(key: &str, value: &str) {
+    if let Ok(entry) = keyring::Entry::new("mc-launcher", key) {
+        let _ = entry.set_password(value);
+    }
+}
+
 pub struct AccountManager {
     path: PathBuf,
     data: serde_json::Value,
@@ -57,6 +69,10 @@ impl AccountManager {
         });
         self.data["default"] = serde_json::json!("msa");
         self.save();
+        // Also store in system keychain for security
+        if !refresh_token.is_empty() {
+            set_secret("msa_refresh_token", refresh_token);
+        }
     }
 
     pub fn set_offline(&mut self, username: &str) {
@@ -83,6 +99,12 @@ impl AccountManager {
             }
         }
         None
+    }
+
+    /// Try to recover the MSA refresh token from the system keychain.
+    /// Used as fallback when the JSON file has an empty refresh_token.
+    pub fn get_keychain_refresh_token(&self) -> Option<String> {
+        get_secret("msa_refresh_token")
     }
 
     pub fn accounts(&self) -> &serde_json::Value {

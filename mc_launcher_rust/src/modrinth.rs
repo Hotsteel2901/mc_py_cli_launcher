@@ -8,7 +8,7 @@ const MODRINTH_API: &str = "https://api.modrinth.com/v2";
 #[allow(dead_code)]
 const LAUNCHER_NAME: &str = "simple-mc-cli";
 #[allow(dead_code)]
-const LAUNCHER_VER: &str = "2.1.0";
+const LAUNCHER_VER: &str = env!("CARGO_PKG_VERSION");
 
 fn api_get(path: &str, params: &[(&str, &str)]) -> serde_json::Value {
     let mut serializer = url::form_urlencoded::Serializer::new(String::new());
@@ -170,14 +170,17 @@ pub fn download_version_files(
         let url = f["url"].as_str().unwrap_or("");
 
         if !file_path.exists() {
-            http::download_file(
+            if let Err(e) = http::download_file(
                 url,
                 &file_path,
                 if label.is_empty() { filename } else { label },
                 None,
                 3,
                 true,
-            );
+            ) {
+                crate::warn_msg!("Failed to download {}: {}", filename, e);
+                continue;
+            }
         } else {
             crate::info!("{} -- cached", filename);
         }

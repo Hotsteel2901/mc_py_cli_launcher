@@ -2,7 +2,7 @@
 #![allow(dead_code)]
 
 #[cfg(not(windows))]
-use std::io::IsTerminal;
+use std::io::{self, IsTerminal};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 static QUIET: AtomicBool = AtomicBool::new(false);

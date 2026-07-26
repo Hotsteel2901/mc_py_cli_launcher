@@ -5,6 +5,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use url::form_urlencoded;
 
+use crate::error::{AppError, AppResult};
 use crate::http;
 use crate::log;
 
@@ -52,7 +53,7 @@ impl MicrosoftAuth {
     }
 
     /// Browser-based Microsoft login. Opens browser, user pastes redirect URL.
-    pub fn login(&mut self) -> bool {
+    pub fn login(&mut self) -> AppResult<bool> {
         let params = form_urlencoded::Serializer::new(String::new())
             .append_pair("client_id", MS_CLIENT_ID)
             .append_pair("response_type", "code")
@@ -97,11 +98,11 @@ impl MicrosoftAuth {
         io::stdout().flush().ok();
         let mut redirect_url = String::new();
         if io::stdin().read_line(&mut redirect_url).is_err() {
-            crate::die!("Cancelled.");
+            return Err(AppError::Generic("Cancelled.".into()));
         }
         let redirect_url = redirect_url.trim().to_string();
         if redirect_url.is_empty() {
-            crate::die!("No URL provided.");
+            return Err(AppError::Generic("No URL provided.".into()));
         }
 
         let auth_code = url::Url::parse(&redirect_url)
@@ -114,9 +115,9 @@ impl MicrosoftAuth {
             .unwrap_or_default();
 
         if auth_code.is_empty() {
-            crate::die!(
-                "Could not find 'code' in the URL. Make sure you copied the FULL URL."
-            );
+            return Err(AppError::Generic(
+                "Could not find 'code' in the URL. Make sure you copied the FULL URL.".into()
+            ));
         }
 
         crate::log::step(2, 6, "Exchanging auth code for Microsoft token...");
@@ -130,11 +131,11 @@ impl MicrosoftAuth {
 
         let (status, body) =
             http::http_post_form(MS_TOKEN_URL, token_body.as_bytes())
-                .unwrap_or_else(|e| crate::die!(format!("Token exchange failed: {}", e)));
+                .map_err(|e| AppError::Generic(format!("Token exchange failed: {}", e)))?;
         if status != 200 {
             let hint =
                 String::from_utf8_lossy(&body).chars().take(500).collect::<String>();
-            crate::die!(format!("Token exchange failed ({})", status), &hint);
+            return Err(AppError::Generic(format!("Token exchange failed ({}) -- {}", status, hint)));
         }
 
         let ms_data: serde_json::Value = serde_json::from_slice(&body).unwrap();
@@ -152,15 +153,15 @@ impl MicrosoftAuth {
                 self.uuid = id;
                 self.expires_at = exp;
             }
-            Err(e) => crate::die!(e),
+            Err(e) => return Err(AppError::Generic(e)),
         }
 
         crate::success!("Logged in as: {} ({})", self.username, self.uuid);
-        true
+        Ok(true)
     }
 
     /// Device-code login (no browser available).
-    pub fn device_code_login(&mut self) -> bool {
+    pub fn device_code_login(&mut self) -> AppResult<bool> {
         println!(
             "\n  {}\n",
             log::clr(
@@ -184,11 +185,11 @@ impl MicrosoftAuth {
 
         let (status, body) =
             http::http_post_form(MS_DEVICE_AUTH, dev_body.as_bytes())
-                .unwrap_or_else(|e| crate::die!(format!("Device code request failed: {}", e)));
+                .map_err(|e| AppError::Generic(format!("Device code request failed: {}", e)))?;
         if status != 200 {
             let hint =
                 String::from_utf8_lossy(&body).chars().take(500).collect::<String>();
-            crate::die!(format!("Device code request failed ({})", status), &hint);
+            return Err(AppError::Generic(format!("Device code request failed ({}) -- {}", status, hint)));
         }
 
         let dev_data: serde_json::Value = serde_json::from_slice(&body).unwrap();
@@ -254,18 +255,18 @@ impl MicrosoftAuth {
                             let desc = err["error_description"]
                                 .as_str()
                                 .unwrap_or("unknown error");
-                            crate::die!(format!("Device login failed: {}", desc));
+                            return Err(AppError::Generic(format!("Device login failed: {}", desc)));
                         }
                     }
                 }
                 Err(e) => {
-                    crate::die!(format!("Device token request failed: {}", e));
+                    return Err(AppError::Generic(format!("Device token request failed: {}", e)));
                 }
             }
         }
 
         if self.access_token.is_empty() {
-            crate::die!("Timed out waiting for device code login.");
+            return Err(AppError::Generic("Timed out waiting for device code login.".into()));
         }
 
         crate::success!("Authenticated with Microsoft!");
@@ -277,11 +278,11 @@ impl MicrosoftAuth {
                 self.uuid = id;
                 self.expires_at = exp;
             }
-            Err(e) => crate::die!(e),
+            Err(e) => return Err(AppError::Generic(e)),
         }
 
         crate::success!("Logged in as: {} ({})", self.username, self.uuid);
-        true
+        Ok(true)
     }
 
     /// XBL -> XSTS -> Minecraft login chain.

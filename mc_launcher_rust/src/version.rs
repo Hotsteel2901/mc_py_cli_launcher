@@ -5,8 +5,12 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
+use indicatif::{ProgressBar, ProgressStyle};
 use rayon::prelude::*;
 
+use std::sync::{Arc, Mutex};
+
+use crate::error::{AppError, AppResult};
 use crate::http;
 use crate::util;
 
@@ -31,7 +35,7 @@ impl VersionManager {
     }
 
     /// Fetch (or use cached) Minecraft version manifest.
-    pub fn fetch_manifest(&self) -> serde_json::Value {
+    pub fn fetch_manifest(&self) -> AppResult<serde_json::Value> {
         let manifest_path = self.game_dir.join("version_manifest_v2.json");
 
         // Use cache if less than 5 minutes old
@@ -42,7 +46,7 @@ impl VersionManager {
                         if elapsed.as_secs() < 300 {
                             if let Ok(data) = fs::read_to_string(&manifest_path) {
                                 if let Ok(json) = serde_json::from_str(&data) {
-                                    return json;
+                                    return Ok(json);
                                 }
                             }
                         }
@@ -51,28 +55,30 @@ impl VersionManager {
             }
         }
 
-        let (status, body) = http::http_get(MC_MANIFEST).unwrap_or_else(|e| {
-            crate::die!(format!("Cannot fetch version manifest: {}", e));
-        });
+        let (status, body) = http::http_get(MC_MANIFEST)
+            .map_err(|e| AppError::Http(format!("Cannot fetch version manifest: {}", e)))?;
         if status != 200 {
             let hint = String::from_utf8_lossy(&body)
                 .chars()
                 .take(300)
                 .collect::<String>();
-            crate::die!(format!("Cannot fetch version manifest ({})", status), &hint);
+            return Err(AppError::Http(format!(
+                "Cannot fetch version manifest ({}) -- {}",
+                status, hint
+            )));
         }
 
         fs::create_dir_all(&self.game_dir).ok();
         fs::write(&manifest_path, &body).ok();
-        serde_json::from_slice(&body).unwrap()
+        Ok(serde_json::from_slice(&body)?)
     }
 
     /// Get version info for a specific version ID (or "latest" / "latest-snapshot").
     pub fn get_version_info(
         &self,
         version_id: Option<&str>,
-    ) -> (String, serde_json::Value) {
-        let manifest = self.fetch_manifest();
+    ) -> AppResult<(String, serde_json::Value)> {
+        let manifest = self.fetch_manifest()?;
         let mut vid = version_id.unwrap_or("latest").to_string();
 
         if vid == "latest" {
@@ -99,26 +105,34 @@ impl VersionManager {
                     .unwrap_or_default();
 
                 let hint = format!("Available (Mojang): {}...", avail.join(", "));
-                crate::die!(format!("Version '{}' not found.", vid), &hint);
+                return Err(AppError::Generic(format!(
+                    "Version '{}' not found. {}",
+                    vid, hint
+                )));
             }
         };
 
         let json_path = self.versions_dir.join(&vid).join(format!("{}.json", vid));
         if !json_path.exists() {
             crate::info!("Downloading version manifest for {}...", vid);
-            http::download_file(
+            if let Err(e) = http::download_file(
                 entry["url"].as_str().unwrap_or(""),
                 &json_path,
                 &format!("{}.json", vid),
                 None,
                 3,
                 true,
-            );
+            ) {
+                return Err(AppError::Http(format!(
+                    "Cannot download version manifest: {}",
+                    e
+                )));
+            }
         }
 
         let version_data: serde_json::Value =
-            serde_json::from_str(&fs::read_to_string(&json_path).unwrap()).unwrap();
-        (vid, version_data)
+            serde_json::from_str(&fs::read_to_string(&json_path)?)?;
+        Ok((vid, version_data))
     }
 
     /// Download the client JAR for a version.
@@ -126,13 +140,13 @@ impl VersionManager {
         &self,
         version_id: &str,
         version_data: &serde_json::Value,
-    ) -> PathBuf {
+    ) -> AppResult<PathBuf> {
         let jar_path = self
             .versions_dir
             .join(version_id)
             .join(format!("{}.jar", version_id));
         if jar_path.exists() {
-            return jar_path;
+            return Ok(jar_path);
         }
         let url = version_data["downloads"]["client"]["url"]
             .as_str()
@@ -141,15 +155,17 @@ impl VersionManager {
             .as_str()
             .unwrap_or("");
         crate::info!("Downloading client jar for {}...", version_id);
-        http::download_file(
+        if let Err(e) = http::download_file(
             url,
             &jar_path,
             &format!("{}.jar", version_id),
             Some(sha1),
             3,
             true,
-        );
-        jar_path
+        ) {
+            return Err(AppError::Http(format!("Cannot download client jar: {}", e)));
+        }
+        Ok(jar_path)
     }
 
     /// Determine if a native library classifier matches current OS/arch.
@@ -237,10 +253,10 @@ impl VersionManager {
         version_data: &serde_json::Value,
         natives_dir: &Path,
         max_workers: usize,
-    ) -> Vec<PathBuf> {
+    ) -> AppResult<Vec<PathBuf>> {
         let libs = version_data["libraries"].as_array();
         if libs.is_none() {
-            return Vec::new();
+            return Ok(Vec::new());
         }
         let libs = libs.unwrap();
         let osn = util::os_name();
@@ -282,7 +298,7 @@ impl VersionManager {
             }
 
             let is_native_by_name =
-                classifier.map_or(false, |c| c.contains("natives-"));
+                classifier.is_some_and(|c| c.contains("natives-"));
             let label_suffix = if is_native_by_name { " [native]" } else { "" };
 
             // Main artifact
@@ -360,42 +376,38 @@ impl VersionManager {
 
         if !all_downloads.is_empty() {
             let total = all_downloads.len();
-            let done = std::sync::atomic::AtomicUsize::new(0);
+            let pb = ProgressBar::new(total as u64);
+            pb.set_style(
+                ProgressStyle::default_bar()
+                    .template("{msg:40} [{bar:25}] {pos}/{len}")
+                    .unwrap(),
+            );
+            pb.set_message("Libraries");
+
+            let failed: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
 
             all_downloads.par_iter().for_each(|(url, dest, label)| {
                 if dest.exists() {
-                    done.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    pb.inc(1);
                     return;
                 }
-                let ok = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    http::download_file(url, dest, label, None, 2, false);
-                    true
-                }))
-                .is_ok();
-                let n = done.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
-                let pct = n * 100 / total;
-                let filled = pct * 25 / 100;
-                let bar: String = (0..25)
-                    .map(|i| {
-                        if i < filled { '\u{2588}' } else { '\u{2591}' }
-                    })
-                    .collect();
-                print!(
-                    "\r  [{:3}%] {} {}/{} libs",
-                    pct, bar, n, total
-                );
-                use std::io::Write;
-                std::io::stdout().flush().ok();
-                if !ok {
-                    println!("\n    FAILED: {}", label);
+                if let Err(e) = http::download_file(url, dest, label, None, 2, false) {
+                    let mut failed = failed.lock().unwrap();
+                    failed.push(format!("{}: {}", label, e));
                 }
+                pb.inc(1);
             });
 
-            let bar_done: String = (0..25).map(|_| '\u{2588}').collect();
-            println!(
-                "\r  [100%] {} {}/{} libs -- done    ",
-                bar_done, total, total
-            );
+            pb.finish_with_message("Libraries done");
+
+            let failed = Arc::try_unwrap(failed).unwrap().into_inner().unwrap();
+            if !failed.is_empty() {
+                return Err(AppError::Http(format!(
+                    "Failed to download {} library(s):\n    {}",
+                    failed.len(),
+                    failed.join("\n    ")
+                )));
+            }
         }
 
         // Extract natives from downloaded jars
@@ -425,7 +437,7 @@ impl VersionManager {
             let (group, artifact, version) = (parts[0], parts[1], parts[2]);
             let classifier = parts.get(3).copied();
             let is_native_new =
-                classifier.map_or(false, |c| c.contains("natives-"));
+                classifier.is_some_and(|c| c.contains("natives-"));
             let group_path = group.replace('.', "/");
             let lib_dir = self
                 .libraries_dir
@@ -476,12 +488,28 @@ impl VersionManager {
             }
         }
 
-        all_jars
+        Ok(all_jars)
     }
 
     /// Extract native libraries (dll, so, dylib) from a JAR file.
     pub fn extract_natives(&self, jar_path: &Path, natives_dir: &Path) {
         fs::create_dir_all(natives_dir).ok();
+
+        // Check if this jar was already extracted
+        let marker_path = natives_dir.join(".natives_extracted");
+        let jar_name = jar_path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy();
+        let marker_content = if marker_path.exists() {
+            std::fs::read_to_string(&marker_path).unwrap_or_default()
+        } else {
+            String::new()
+        };
+        if marker_content.contains(jar_name.as_ref()) {
+            return;
+        }
+
         let file = match fs::File::open(jar_path) {
             Ok(f) => f,
             Err(_) => return,
@@ -498,6 +526,7 @@ impl VersionManager {
             }
         };
 
+        let mut extracted = false;
         for i in 0..archive.len() {
             let mut entry = match archive.by_index(i) {
                 Ok(e) => e,
@@ -506,14 +535,14 @@ impl VersionManager {
             let name = entry
                 .name()
                 .split('/')
-                .last()
+                .next_back()
                 .unwrap_or("")
                 .to_string();
             if name.is_empty() {
                 continue;
             }
             let ext = name
-                .rsplitn(2, '.')
+                .rsplit('.')
                 .next()
                 .unwrap_or("")
                 .to_lowercase();
@@ -523,9 +552,20 @@ impl VersionManager {
                     let mut buf = Vec::new();
                     if entry.read_to_end(&mut buf).is_ok() {
                         fs::write(&target, &buf).ok();
+                        extracted = true;
                     }
                 }
             }
+        }
+
+        // Mark this jar as extracted
+        if extracted {
+            let mut marker = marker_content;
+            if !marker.is_empty() {
+                marker.push('\n');
+            }
+            marker.push_str(&jar_name);
+            fs::write(&marker_path, &marker).ok();
         }
     }
 
@@ -534,13 +574,13 @@ impl VersionManager {
         &self,
         version_data: &serde_json::Value,
         max_workers: usize,
-    ) -> String {
+    ) -> AppResult<String> {
         let asset_index = &version_data["assetIndex"];
         if asset_index.is_null() {
-            return version_data["assets"]
+            return Ok(version_data["assets"]
                 .as_str()
                 .unwrap_or("legacy")
-                .to_string();
+                .to_string());
         }
 
         let index_id = asset_index["id"].as_str().unwrap_or("");
@@ -551,14 +591,16 @@ impl VersionManager {
 
         if !index_path.exists() {
             let url = asset_index["url"].as_str().unwrap_or("");
-            http::download_file(
+            if let Err(e) = http::download_file(
                 url,
                 &index_path,
                 &format!("Asset index {}", index_id),
                 None,
                 3,
                 true,
-            );
+            ) {
+                return Err(AppError::Http(format!("Cannot download asset index: {}", e)));
+            }
         }
 
         let index_data: serde_json::Value =
@@ -566,7 +608,7 @@ impl VersionManager {
                 .unwrap();
         let objects = index_data["objects"].as_object();
         if objects.is_none() {
-            return index_id.to_string();
+            return Ok(index_id.to_string());
         }
         let objects = objects.unwrap();
         let total = objects.len();
@@ -587,7 +629,7 @@ impl VersionManager {
 
         if missing.is_empty() {
             crate::info!("Assets: all {} up to date.", total);
-            return index_id.to_string();
+            return Ok(index_id.to_string());
         }
 
         crate::info!(
@@ -598,45 +640,93 @@ impl VersionManager {
         );
 
         let total_missing = missing.len();
-        let dl =
-            std::sync::atomic::AtomicUsize::new(0);
-        let fail =
-            std::sync::atomic::AtomicUsize::new(0);
+        let pb = ProgressBar::new(total_missing as u64);
+        pb.set_style(
+            ProgressStyle::default_bar()
+                .template("{msg:40} [{bar:25}] {pos}/{len}")
+                .unwrap(),
+        );
+        pb.set_message("Assets");
+
+        let failed: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
 
         missing.par_iter().for_each(|(url, dest)| {
-            let ok = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                http::download_file(url, dest, "", None, 2, false);
-                true
-            }))
-            .is_ok();
-            if ok {
-                dl.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            } else {
-                fail.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if let Err(e) = http::download_file(url, dest, "", None, 2, false) {
+                let mut failed = failed.lock().unwrap();
+                failed.push(format!("{}: {}", url, e));
             }
-            let done = dl.load(std::sync::atomic::Ordering::Relaxed)
-                + fail.load(std::sync::atomic::Ordering::Relaxed);
-            let pct = done * 100 / total_missing;
-            let filled = pct * 25 / 100;
-            let bar: String = (0..25)
-                .map(|i| if i < filled { '\u{2588}' } else { '\u{2591}' })
-                .collect();
-            print!(
-                "\r  [{:3}%] {} {}/{} assets",
-                pct, bar, done, total_missing
-            );
-            use std::io::Write;
-            std::io::stdout().flush().ok();
+            pb.inc(1);
         });
 
-        let bar_done: String = (0..25).map(|_| '\u{2588}').collect();
-        let dl_final = dl.load(std::sync::atomic::Ordering::Relaxed);
-        let fail_final = fail.load(std::sync::atomic::Ordering::Relaxed);
-        println!(
-            "\r  [100%] {} {} new, {} failed -- done    ",
-            bar_done, dl_final, fail_final
-        );
+        pb.finish_with_message("Assets done");
 
-        index_id.to_string()
+        let failed = Arc::try_unwrap(failed).unwrap().into_inner().unwrap();
+        if !failed.is_empty() {
+            return Err(AppError::Http(format!(
+                "Failed to download {} asset(s):\n    {}",
+                failed.len(),
+                failed.join("\n    ")
+            )));
+        }
+
+        Ok(index_id.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_rules_allow_empty() {
+        let rules = serde_json::json!([]);
+        assert!(VersionManager::rules_allow(&rules, true));
+        assert!(!VersionManager::rules_allow(&rules, false));
+    }
+
+    #[test]
+    fn test_rules_allow_os_windows() {
+        let rules = serde_json::json!([
+            {"action": "allow", "os": {"name": "windows"}},
+            {"action": "disallow", "os": {"name": "linux"}},
+            {"action": "disallow", "os": {"name": "osx"}}
+        ]);
+        let result = VersionManager::rules_allow(&rules, false);
+        // On Windows, this should be true; on Linux/macOS, false
+        let expected = cfg!(windows);
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn test_rules_allow_disallow_override() {
+        let rules = serde_json::json!([
+            {"action": "allow", "os": {"name": "linux"}},
+            {"action": "disallow", "os": {"name": "linux"}}
+        ]);
+        // Last matching rule should win
+        let result = VersionManager::rules_allow(&rules, true);
+        let expected = !cfg!(target_os = "linux");
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn test_rules_allow_with_arch() {
+        let rules = serde_json::json!([
+            {"action": "allow", "os": {"name": "linux", "arch": "x86_64"}}
+        ]);
+        let result = VersionManager::rules_allow(&rules, false);
+        let expected = cfg!(target_os = "linux") && cfg!(target_arch = "x86_64");
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn test_rules_allow_with_features() {
+        // Features rules should be skipped (match = false)
+        let rules = serde_json::json!([
+            {"action": "allow", "features": {"is_demo_user": true}}
+        ]);
+        let result = VersionManager::rules_allow(&rules, false);
+        // Features rules don't match, so default applies
+        assert!(!result);
     }
 }

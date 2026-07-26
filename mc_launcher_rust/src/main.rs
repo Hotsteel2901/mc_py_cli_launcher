@@ -5,6 +5,7 @@
 
 mod account;
 mod auth;
+mod error;
 mod fabric;
 mod forge;
 mod http;
@@ -53,7 +54,7 @@ fn parse_ram(value: &str) -> Result<u32, String> {
 
 fn main() {
     let matches = Command::new("mc-launcher")
-        .version("2.1.0")
+        .version(env!("CARGO_PKG_VERSION"))
         .about(
             "Simple Minecraft CLI Launcher -- Microsoft + offline + \
              Fabric/Forge/NeoForge + Modrinth mods",
@@ -267,7 +268,7 @@ fn cmd_logout(launcher: &mut MinecraftLauncher) {
 fn cmd_accounts(launcher: &MinecraftLauncher) {
     crate::log::header("Saved Accounts");
     let accs = launcher.accounts.accounts();
-    if accs.as_object().map_or(true, |o| o.is_empty()) {
+    if accs.as_object().is_none_or(|o| o.is_empty()) {
         crate::warn_msg!("No accounts saved.");
         crate::info!("Login:  mc-launcher login");
         crate::info!("Offline: mc-launcher offline <username>");
@@ -739,7 +740,8 @@ fn cmd_install_fabric(
     crate::info!("Target MC version: {}", mc_version);
 
     let fm = FabricManager::new(game_dir);
-    let (all_jars, profile) = fm.install(&mc_version, loader_version);
+    let (all_jars, profile) = fm.install(&mc_version, loader_version)
+        .unwrap_or_else(|e| crate::die!(format!("Fabric install failed: {}", e)));
 
     crate::success!("Fabric Loader installed successfully!");
     println!("    MC Version: {}", mc_version);
@@ -765,7 +767,8 @@ fn cmd_install_forge(
     crate::info!("Target MC version: {}", mc_version);
 
     let fm = ForgeManager::new(game_dir);
-    let (installed_id, profile) = fm.install(&mc_version, loader_version);
+    let (installed_id, profile) = fm.install(&mc_version, loader_version)
+        .unwrap_or_else(|e| crate::die!(format!("Forge install failed: {}", e)));
 
     crate::success!("Forge Loader installed successfully!");
     println!("    MC Version: {}", mc_version);
@@ -790,7 +793,8 @@ fn cmd_install_neoforge(
     crate::info!("Target MC version: {}", mc_version);
 
     let nm = NeoForgeManager::new(game_dir);
-    let (installed_id, profile) = nm.install(&mc_version, loader_version);
+    let (installed_id, profile) = nm.install(&mc_version, loader_version)
+        .unwrap_or_else(|e| crate::die!(format!("NeoForge install failed: {}", e)));
 
     crate::success!("NeoForge Loader installed successfully!");
     println!("    MC Version: {}", mc_version);
@@ -920,13 +924,17 @@ fn cmd_login(launcher: &mut MinecraftLauncher, device_code: bool) {
     let mut auth = MicrosoftAuth::new();
 
     if device_code {
-        auth.device_code_login();
+        auth.device_code_login().unwrap_or_else(|e| {
+            crate::die!(format!("Login failed: {}", e));
+        });
     } else {
         crate::log::header("Microsoft Login (Browser)");
         crate::info!("A browser window will open. Log in with your Microsoft account.");
         crate::info!("Make sure your Microsoft account owns Minecraft!\n");
         crate::info!("Tip: use --device-code for device code login.\n");
-        auth.login();
+        auth.login().unwrap_or_else(|e| {
+            crate::die!(format!("Login failed: {}", e));
+        });
     }
 
     let uid = crate::util::format_uuid(&auth.uuid);
@@ -959,7 +967,11 @@ fn cmd_download(
     no_assets: bool,
 ) {
     crate::log::header("Download Only");
-    launcher.download_version(mc_version, no_assets);
+    launcher
+        .download_version(mc_version, no_assets)
+        .unwrap_or_else(|e| {
+            crate::die!(format!("Download failed: {}", e));
+        });
 }
 
 fn cmd_play(
@@ -977,7 +989,12 @@ fn cmd_play(
         );
     });
 
-    launcher.launch(mc_version, Some(account), ram_mb, loader, width, height);
+    let exit_code = launcher
+        .launch(mc_version, Some(account), ram_mb, loader, width, height)
+        .unwrap_or_else(|e| {
+            crate::die!(format!("Launch failed: {}", e));
+        });
+    std::process::exit(exit_code);
 }
 
 // ─── helpers ───────────────────────────────────────────────────────
@@ -1006,7 +1023,9 @@ fn resolve_mc_version_or_latest(
 ) -> String {
     if let Some(v) = mc_version {
         let vm = VersionManager::new(game_dir);
-        let manifest = vm.fetch_manifest();
+        let manifest = vm.fetch_manifest().unwrap_or_else(|e| {
+            crate::die!(format!("Cannot fetch version manifest: {}", e));
+        });
         let known: std::collections::HashSet<String> = manifest["versions"]
             .as_array()
             .map(|arr| {
@@ -1038,7 +1057,9 @@ fn resolve_mc_version_or_latest(
     }
 
     let vm = VersionManager::new(game_dir);
-    let manifest = vm.fetch_manifest();
+    let manifest = vm.fetch_manifest().unwrap_or_else(|e| {
+        crate::die!(format!("Cannot fetch version manifest: {}", e));
+    });
     manifest["latest"]["release"]
         .as_str()
         .unwrap_or("1.21.4")

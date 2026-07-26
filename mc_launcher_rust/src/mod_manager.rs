@@ -114,6 +114,7 @@ impl ModManager {
         versions: &serde_json::Value,
     ) -> std::collections::BTreeMap<String, (String, String)> {
         let mc_re = regex::Regex::new(r"^\d+\.\d+(\.\d+)?$").unwrap();
+        let num_re = regex::Regex::new(r"\d+").unwrap();
         let mut support: std::collections::BTreeMap<String, (String, String)> =
             std::collections::BTreeMap::new();
 
@@ -136,13 +137,11 @@ impl ModManager {
             let top = game_versions
                 .iter()
                 .max_by(|a, b| {
-                    let na: Vec<u32> = regex::Regex::new(r"\d+")
-                        .unwrap()
+                    let na: Vec<u32> = num_re
                         .find_iter(a)
                         .filter_map(|m| m.as_str().parse().ok())
                         .collect();
-                    let nb: Vec<u32> = regex::Regex::new(r"\d+")
-                        .unwrap()
+                    let nb: Vec<u32> = num_re
                         .find_iter(b)
                         .filter_map(|m| m.as_str().parse().ok())
                         .collect();
@@ -161,13 +160,11 @@ impl ModManager {
                     let cur = support.get(&l);
                     let insert = match cur {
                         Some((cur_mc, _)) => {
-                            let na: Vec<u32> = regex::Regex::new(r"\d+")
-                                .unwrap()
+                            let na: Vec<u32> = num_re
                                 .find_iter(&top_mc)
                                 .filter_map(|m| m.as_str().parse().ok())
                                 .collect();
-                            let nb: Vec<u32> = regex::Regex::new(r"\d+")
-                                .unwrap()
+                            let nb: Vec<u32> = num_re
                                 .find_iter(cur_mc)
                                 .filter_map(|m| m.as_str().parse().ok())
                                 .collect();
@@ -270,7 +267,7 @@ impl ModManager {
 
         let proj_title = project["title"].as_str().unwrap_or(slug);
 
-        if versions.as_array().map_or(true, |a| a.is_empty()) {
+        if versions.as_array().is_none_or(|a| a.is_empty()) {
             let extra = format!(
                 " for MC {}{}",
                 mc_version,
@@ -301,7 +298,7 @@ impl ModManager {
         let target = if let Some(vid) = version_id {
             versions_arr
                 .iter()
-                .find(|v| v["id"].as_str().map_or(false, |id| id == vid))
+                .find(|v| v["id"].as_str() == Some(vid))
                 .cloned()
                 .unwrap_or_else(|| {
                     crate::die!(format!(
@@ -312,23 +309,23 @@ impl ModManager {
         } else {
             // Sort: loader match first, then by date
             versions_arr.sort_by(|a, b| {
-                let a_match = loader.as_ref().map_or(true, |l| {
+                let a_match = loader.as_ref().is_none_or(|l| {
                     a["loaders"]
                         .as_array()
-                        .map_or(false, |arr| {
+                        .is_some_and(|arr| {
                             arr.iter().any(|v| {
-                                v.as_str().map_or(false, |s| {
+                                v.as_str().is_some_and(|s| {
                                     s.to_lowercase() == l.to_lowercase()
                                 })
                             })
                         })
                 });
-                let b_match = loader.as_ref().map_or(true, |l| {
+                let b_match = loader.as_ref().is_none_or(|l| {
                     b["loaders"]
                         .as_array()
-                        .map_or(false, |arr| {
+                        .is_some_and(|arr| {
                             arr.iter().any(|v| {
-                                v.as_str().map_or(false, |s| {
+                                v.as_str().is_some_and(|s| {
                                     s.to_lowercase() == l.to_lowercase()
                                 })
                             })
@@ -373,10 +370,10 @@ impl ModManager {
             .unwrap_or_else(|| "?".to_string());
 
         if let Some(ref l) = loader {
-            let has_loader = target["loaders"].as_array().map_or(false, |arr| {
+            let has_loader = target["loaders"].as_array().is_some_and(|arr| {
                 arr.iter().any(|v| {
                     v.as_str()
-                        .map_or(false, |s| s.to_lowercase() == l.to_lowercase())
+                        .is_some_and(|s| s.to_lowercase() == l.to_lowercase())
                 })
             });
             if !has_loader {
@@ -580,12 +577,27 @@ impl ModManager {
             }
         }
 
-        println!();
         if !required_missing.is_empty() {
             crate::warn_msg!(
                 "{} required dependency(ies) missing. Install them first, or the mod may not load.",
                 required_missing.len()
             );
+            
+            // Auto-install required dependencies
+            print!("\n  Auto-install missing dependencies? [y/N]: ");
+            use std::io::{self, Write};
+            io::stdout().flush().ok();
+            let mut answer = String::new();
+            if io::stdin().read_line(&mut answer).is_ok() {
+                let answer = answer.trim().to_lowercase();
+                if answer == "y" || answer == "yes" {
+                    for (title, slug, _ver, _mc) in &required_missing {
+                        crate::info!("Installing dependency: {} ({})", title, slug);
+                        self.install(slug, mc_version, loader, None);
+                        crate::success!("Installed: {}", title);
+                    }
+                }
+            }
         }
         println!();
     }

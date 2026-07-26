@@ -57,7 +57,7 @@ pub fn sha1_file(path: &Path) -> String {
 /// Check if a JAR file appears intact (starts with ZIP magic).
 pub fn is_jar_intact(path: &Path) -> bool {
     match fs::metadata(path) {
-        Ok(m) if m.len() >= 22 => File::open(path).ok().map_or(false, |mut f| {
+        Ok(m) if m.len() >= 22 => File::open(path).ok().is_some_and(|mut f| {
             let mut magic = [0u8; 4];
             f.read_exact(&mut magic).is_ok() && &magic == b"PK\x03\x04"
         }),
@@ -119,5 +119,81 @@ pub fn format_uuid(raw: &str) -> String {
         )
     } else {
         raw.to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_offline_uuid_known() {
+        // Test that offline_uuid returns a consistent UUID for a known username
+        let uuid = offline_uuid("Steve");
+        // Should be a valid UUID format
+        assert_eq!(uuid.len(), 36);
+        assert_eq!(uuid.chars().filter(|&c| c == '-').count(), 4);
+        // Deterministic test
+        let uuid2 = offline_uuid("Steve");
+        assert_eq!(uuid, uuid2);
+    }
+
+    #[test]
+    fn test_offline_uuid_different_users() {
+        let uuid1 = offline_uuid("Steve");
+        let uuid2 = offline_uuid("Alex");
+        assert_ne!(uuid1, uuid2);
+    }
+
+    #[test]
+    fn test_maven_rel_path() {
+        let path = maven_rel_path("com.example:test-lib:1.0.0");
+        assert_eq!(path, "com/example/test-lib/1.0.0/test-lib-1.0.0.jar");
+    }
+
+    #[test]
+    fn test_maven_rel_path_with_classifier() {
+        let path = maven_rel_path("org.lwjgl:lwjgl:3.2.1:natives-windows");
+        assert_eq!(path, "org/lwjgl/lwjgl/3.2.1/lwjgl-3.2.1-natives-windows.jar");
+    }
+
+    #[test]
+    fn test_format_uuid_32_chars() {
+        let raw = "c1a5e5a5e5a5e5a5e5a5e5a5e5a5e5a5";
+        let formatted = format_uuid(raw);
+        assert_eq!(formatted.len(), 36);
+        assert_eq!(formatted.chars().filter(|&c| c == '-').count(), 4);
+    }
+
+    #[test]
+    fn test_format_uuid_short() {
+        let raw = "short";
+        let formatted = format_uuid(raw);
+        assert_eq!(formatted, "short");
+    }
+
+    #[test]
+    fn test_format_uuid_with_dashes() {
+        let raw = "c1a5e5a5-e5a5-e5a5-e5a5-e5a5e5a5e5a5";
+        let formatted = format_uuid(raw);
+        assert_eq!(formatted, raw);
+    }
+
+    #[test]
+    fn test_is_jar_intact_negative() {
+        let path = std::path::Path::new("/nonexistent/file.jar");
+        assert!(!is_jar_intact(path));
+    }
+
+    #[test]
+    fn test_os_name() {
+        let name = os_name();
+        assert!(name == "windows" || name == "osx" || name == "linux");
+    }
+
+    #[test]
+    fn test_os_arch() {
+        let arch = os_arch();
+        assert!(arch == "x86_64" || arch == "arm64" || arch == "unknown");
     }
 }
