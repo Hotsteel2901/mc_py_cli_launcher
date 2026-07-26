@@ -8,6 +8,8 @@ use std::time::SystemTime;
 use indicatif::{ProgressBar, ProgressStyle};
 use rayon::prelude::*;
 
+use std::sync::{Arc, Mutex};
+
 use crate::http;
 use crate::util;
 
@@ -107,14 +109,16 @@ impl VersionManager {
         let json_path = self.versions_dir.join(&vid).join(format!("{}.json", vid));
         if !json_path.exists() {
             crate::info!("Downloading version manifest for {}...", vid);
-            http::download_file(
+            if let Err(e) = http::download_file(
                 entry["url"].as_str().unwrap_or(""),
                 &json_path,
                 &format!("{}.json", vid),
                 None,
                 3,
                 true,
-            );
+            ) {
+                crate::die!(format!("Cannot download version manifest: {}", e));
+            }
         }
 
         let version_data: serde_json::Value =
@@ -142,14 +146,16 @@ impl VersionManager {
             .as_str()
             .unwrap_or("");
         crate::info!("Downloading client jar for {}...", version_id);
-        http::download_file(
+        if let Err(e) = http::download_file(
             url,
             &jar_path,
             &format!("{}.jar", version_id),
             Some(sha1),
             3,
             true,
-        );
+        ) {
+            crate::die!(format!("Cannot download client jar: {}", e));
+        }
         jar_path
     }
 
@@ -283,7 +289,7 @@ impl VersionManager {
             }
 
             let is_native_by_name =
-                classifier.map_or(false, |c| c.contains("natives-"));
+                classifier.is_some_and(|c| c.contains("natives-"));
             let label_suffix = if is_native_by_name { " [native]" } else { "" };
 
             // Main artifact
@@ -369,23 +375,29 @@ impl VersionManager {
             );
             pb.set_message("Libraries");
 
+            let failed: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+
             all_downloads.par_iter().for_each(|(url, dest, label)| {
                 if dest.exists() {
                     pb.inc(1);
                     return;
                 }
-                let ok = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    http::download_file(url, dest, label, None, 2, false);
-                    true
-                }))
-                .is_ok();
-                pb.inc(1);
-                if !ok {
-                    println!("\n    FAILED: {}", label);
+                if let Err(e) = http::download_file(url, dest, label, None, 2, false) {
+                    let mut failed = failed.lock().unwrap();
+                    failed.push(format!("{}: {}", label, e));
                 }
+                pb.inc(1);
             });
 
             pb.finish_with_message("Libraries done");
+
+            let failed = Arc::try_unwrap(failed).unwrap().into_inner().unwrap();
+            if !failed.is_empty() {
+                crate::die!(
+                    format!("Failed to download {} library(s):", failed.len()),
+                    &failed.join("\n    ")
+                );
+            }
         }
 
         // Extract natives from downloaded jars
@@ -415,7 +427,7 @@ impl VersionManager {
             let (group, artifact, version) = (parts[0], parts[1], parts[2]);
             let classifier = parts.get(3).copied();
             let is_native_new =
-                classifier.map_or(false, |c| c.contains("natives-"));
+                classifier.is_some_and(|c| c.contains("natives-"));
             let group_path = group.replace('.', "/");
             let lib_dir = self
                 .libraries_dir
@@ -472,6 +484,22 @@ impl VersionManager {
     /// Extract native libraries (dll, so, dylib) from a JAR file.
     pub fn extract_natives(&self, jar_path: &Path, natives_dir: &Path) {
         fs::create_dir_all(natives_dir).ok();
+
+        // Check if this jar was already extracted
+        let marker_path = natives_dir.join(".natives_extracted");
+        let jar_name = jar_path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy();
+        let marker_content = if marker_path.exists() {
+            std::fs::read_to_string(&marker_path).unwrap_or_default()
+        } else {
+            String::new()
+        };
+        if marker_content.contains(jar_name.as_ref()) {
+            return;
+        }
+
         let file = match fs::File::open(jar_path) {
             Ok(f) => f,
             Err(_) => return,
@@ -488,6 +516,7 @@ impl VersionManager {
             }
         };
 
+        let mut extracted = false;
         for i in 0..archive.len() {
             let mut entry = match archive.by_index(i) {
                 Ok(e) => e,
@@ -496,14 +525,14 @@ impl VersionManager {
             let name = entry
                 .name()
                 .split('/')
-                .last()
+                .next_back()
                 .unwrap_or("")
                 .to_string();
             if name.is_empty() {
                 continue;
             }
             let ext = name
-                .rsplitn(2, '.')
+                .rsplit('.')
                 .next()
                 .unwrap_or("")
                 .to_lowercase();
@@ -513,9 +542,20 @@ impl VersionManager {
                     let mut buf = Vec::new();
                     if entry.read_to_end(&mut buf).is_ok() {
                         fs::write(&target, &buf).ok();
+                        extracted = true;
                     }
                 }
             }
+        }
+
+        // Mark this jar as extracted
+        if extracted {
+            let mut marker = marker_content;
+            if !marker.is_empty() {
+                marker.push('\n');
+            }
+            marker.push_str(&jar_name);
+            fs::write(&marker_path, &marker).ok();
         }
     }
 
@@ -541,14 +581,16 @@ impl VersionManager {
 
         if !index_path.exists() {
             let url = asset_index["url"].as_str().unwrap_or("");
-            http::download_file(
+            if let Err(e) = http::download_file(
                 url,
                 &index_path,
                 &format!("Asset index {}", index_id),
                 None,
                 3,
                 true,
-            );
+            ) {
+                crate::die!(format!("Cannot download asset index: {}", e));
+            }
         }
 
         let index_data: serde_json::Value =
@@ -595,26 +637,26 @@ impl VersionManager {
                 .unwrap(),
         );
         pb.set_message("Assets");
-        let fail = std::sync::atomic::AtomicUsize::new(0);
+
+        let failed: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
 
         missing.par_iter().for_each(|(url, dest)| {
-            let ok = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                http::download_file(url, dest, "", None, 2, false);
-                true
-            }))
-            .is_ok();
-            if !ok {
-                fail.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if let Err(e) = http::download_file(url, dest, "", None, 2, false) {
+                let mut failed = failed.lock().unwrap();
+                failed.push(format!("{}: {}", url, e));
             }
             pb.inc(1);
         });
 
-        let fail_final = fail.load(std::sync::atomic::Ordering::Relaxed);
-        pb.finish_with_message(format!(
-            "Assets done ({} new, {} failed)",
-            total_missing - fail_final,
-            fail_final
-        ));
+        pb.finish_with_message("Assets done");
+
+        let failed = Arc::try_unwrap(failed).unwrap().into_inner().unwrap();
+        if !failed.is_empty() {
+            crate::die!(
+                format!("Failed to download {} asset(s):", failed.len()),
+                &failed.join("\n    ")
+            );
+        }
 
         index_id.to_string()
     }

@@ -92,7 +92,7 @@ impl AccountManager {
             if let Some(acc) = self.data["accounts"].get(key) {
                 let acc_type = acc.get("type").and_then(|v| v.as_str()).unwrap_or("");
                 // For MSA accounts, try keychain fallback for refresh_token
-                if acc_type == "msa" && acc.get("refresh_token").and_then(|v| v.as_str()).map_or(true, |s| s.is_empty()) {
+                if acc_type == "msa" && acc.get("refresh_token").and_then(|v| v.as_str()).is_none_or(|s| s.is_empty()) {
                     if let Some(_rt) = get_secret("msa_refresh_token") {
                         // Note: we can't mutate the stored JSON here, so just log
                         // The launcher.rs will handle fallback
@@ -105,7 +105,7 @@ impl AccountManager {
             if let Some(acc) = self.data["accounts"].get(*k) {
                 let acc_type = acc.get("type").and_then(|v| v.as_str()).unwrap_or("");
                 // For MSA accounts, try keychain fallback for refresh_token
-                if acc_type == "msa" && acc.get("refresh_token").and_then(|v| v.as_str()).map_or(true, |s| s.is_empty()) {
+                if acc_type == "msa" && acc.get("refresh_token").and_then(|v| v.as_str()).is_none_or(|s| s.is_empty()) {
                     if let Some(_rt) = get_secret("msa_refresh_token") {
                         // Note: we can't mutate the stored JSON here, so just log
                         // The launcher.rs will handle fallback

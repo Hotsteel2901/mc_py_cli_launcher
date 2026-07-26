@@ -80,7 +80,7 @@ impl FabricManager {
         let versions = self.get_available_versions(Some(mc_version))?;
         let arr = versions.as_array();
 
-        if arr.map_or(true, |a| a.is_empty()) {
+        if arr.is_none_or(|a| a.is_empty()) {
             return Err(AppError::Loader(format!(
                 "No Fabric loader found for Minecraft {}",
                 mc_version
@@ -131,14 +131,19 @@ impl FabricManager {
                     let full_url =
                         format!("{}/{}", url_base.trim_end_matches('/'), rel_path);
                     let label = name.split(':').nth(1).unwrap_or("unknown");
-                    http::download_file(
+                    if let Err(e) = http::download_file(
                         &full_url,
                         &jar_path,
                         label,
                         None,
                         3,
                         false,
-                    );
+                    ) {
+                        return Err(AppError::Http(format!(
+                            "Failed to download Fabric library {}: {}",
+                            label, e
+                        )));
+                    }
                 }
                 all_jars.push(jar_path);
             }

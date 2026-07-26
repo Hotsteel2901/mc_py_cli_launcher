@@ -181,7 +181,8 @@ impl ForgeManager {
             None,
             3,
             true,
-        );
+        )
+        .map_err(|e| AppError::Loader(format!("Forge installer download failed: {}", e)))?;
 
         let java_path = java::check_java(None).ok_or_else(|| {
             AppError::Loader("Java not found. Cannot run Forge installer.".into())

@@ -141,9 +141,27 @@ impl MinecraftLauncher {
                 .join(l)
                 .join(format!("{}-profile-{}.json", l, mc_version));
             if path.exists() {
-                let profile: serde_json::Value =
-                    serde_json::from_str(&std::fs::read_to_string(&path).unwrap())
-                        .unwrap();
+                let profile: serde_json::Value = match std::fs::read_to_string(&path) {
+                    Ok(s) => match serde_json::from_str(&s) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            crate::warn_msg!(
+                                "Failed to parse loader profile {}: {}",
+                                path.display(),
+                                e
+                            );
+                            return (None, None);
+                        }
+                    },
+                    Err(e) => {
+                        crate::warn_msg!(
+                            "Failed to read loader profile {}: {}",
+                            path.display(),
+                            e
+                        );
+                        return (None, None);
+                    }
+                };
                 return (Some(l.to_string()), Some(profile));
             }
             let install_cmd = if l == "fabric" {
@@ -171,9 +189,27 @@ impl MinecraftLauncher {
                 .join(candidate)
                 .join(format!("{}-profile-{}.json", candidate, mc_version));
             if path.exists() {
-                let profile: serde_json::Value =
-                    serde_json::from_str(&std::fs::read_to_string(&path).unwrap())
-                        .unwrap();
+                let profile: serde_json::Value = match std::fs::read_to_string(&path) {
+                    Ok(s) => match serde_json::from_str(&s) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            crate::warn_msg!(
+                                "Failed to parse loader profile {}: {}",
+                                path.display(),
+                                e
+                            );
+                            continue;
+                        }
+                    },
+                    Err(e) => {
+                        crate::warn_msg!(
+                            "Failed to read loader profile {}: {}",
+                            path.display(),
+                            e
+                        );
+                        continue;
+                    }
+                };
                 return (Some(candidate.to_string()), Some(profile));
             }
         }
@@ -186,7 +222,7 @@ impl MinecraftLauncher {
         &mut self,
         account_data: &mut serde_json::Value,
     ) -> (String, String, String, String) {
-        let acc_type = account_data["type"].as_str().unwrap_or("offline");
+        let acc_type = account_data["type"].as_str().unwrap_or("offline").to_string();
         let username = account_data["username"]
             .as_str()
             .unwrap_or("Player")
@@ -214,6 +250,11 @@ impl MinecraftLauncher {
                     );
                 }
 
+                // Update account_data in memory with new token
+                account_data["access_token"] = serde_json::json!(auth.mc_token);
+                account_data["refresh_token"] = serde_json::json!(auth.refresh_token);
+                account_data["expires_at"] = serde_json::json!(auth.expires_at);
+
                 let uid = util::format_uuid(&auth.uuid);
                 self.accounts.set_msa(
                     &auth.username,
@@ -234,7 +275,7 @@ impl MinecraftLauncher {
             "0".to_string()
         };
 
-        (acc_type.to_string(), username, user_uuid, access_token)
+        (acc_type, username, user_uuid, access_token)
     }
 
     /// Launch Minecraft.
@@ -345,23 +386,19 @@ impl MinecraftLauncher {
                             });
 
                         if let Some(ref url) = url_str {
-                            if let Err(e) = std::panic::catch_unwind(
-                                std::panic::AssertUnwindSafe(|| {
-                                    http::download_file(
-                                        url,
-                                        &lib_jar,
-                                        &lib_jar
-                                            .file_name()
-                                            .unwrap_or_default()
-                                            .to_string_lossy(),
-                                        None,
-                                        2,
-                                        false,
-                                    );
-                                }),
+                            if let Err(e) = http::download_file(
+                                url,
+                                &lib_jar,
+                                &lib_jar
+                                    .file_name()
+                                    .unwrap_or_default()
+                                    .to_string_lossy(),
+                                None,
+                                2,
+                                false,
                             ) {
                                 crate::warn_msg!(
-                                    "Could not download loader library {}: {:?}",
+                                    "Could not download loader library {}: {}",
                                     lib_jar.display(),
                                     e
                                 );
@@ -623,6 +660,14 @@ impl MinecraftLauncher {
         }
 
         // --- Token replacement ---
+        // Offline mode: do not pass auth session/access_token to Minecraft
+        if acc_type == "offline" {
+            game_args.retain(|arg| {
+                !arg.starts_with("--auth_session")
+                    && !arg.starts_with("--auth_access_token")
+            });
+        }
+
         let replacements: Vec<(&str, String)> = vec![
             ("${auth_player_name}", username.clone()),
             ("${auth_uuid}", user_uuid.replace('-', "")),

@@ -96,11 +96,11 @@ impl NeoForgeManager {
                 if v.starts_with(&prefix) {
                     let rest = &v[prefix.len()..];
                     if prefix.ends_with('.') || prefix.ends_with('-') {
-                        rest.chars().next().map_or(false, |c: char| c.is_ascii_digit())
+                        rest.chars().next().is_some_and(|c: char| c.is_ascii_digit())
                     } else {
                         rest.starts_with('.')
                             && rest.len() > 1
-                            && rest.chars().nth(1).map_or(false, |c: char| {
+                            && rest.chars().nth(1).is_some_and(|c: char| {
                                 c.is_ascii_digit()
                             })
                     }
@@ -195,7 +195,8 @@ impl NeoForgeManager {
             None,
             3,
             true,
-        );
+        )
+        .map_err(|e| AppError::Loader(format!("NeoForge installer download failed: {}", e)))?;
 
         let java_path = java::check_java(None).ok_or_else(|| {
             AppError::Loader("Java not found. Cannot run NeoForge installer.".to_string())

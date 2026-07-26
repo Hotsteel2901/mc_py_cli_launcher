@@ -57,7 +57,7 @@ pub fn sha1_file(path: &Path) -> String {
 /// Check if a JAR file appears intact (starts with ZIP magic).
 pub fn is_jar_intact(path: &Path) -> bool {
     match fs::metadata(path) {
-        Ok(m) if m.len() >= 22 => File::open(path).ok().map_or(false, |mut f| {
+        Ok(m) if m.len() >= 22 => File::open(path).ok().is_some_and(|mut f| {
             let mut magic = [0u8; 4];
             f.read_exact(&mut magic).is_ok() && &magic == b"PK\x03\x04"
         }),

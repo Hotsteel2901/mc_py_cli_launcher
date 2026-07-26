@@ -268,7 +268,7 @@ fn cmd_logout(launcher: &mut MinecraftLauncher) {
 fn cmd_accounts(launcher: &MinecraftLauncher) {
     crate::log::header("Saved Accounts");
     let accs = launcher.accounts.accounts();
-    if accs.as_object().map_or(true, |o| o.is_empty()) {
+    if accs.as_object().is_none_or(|o| o.is_empty()) {
         crate::warn_msg!("No accounts saved.");
         crate::info!("Login:  mc-launcher login");
         crate::info!("Offline: mc-launcher offline <username>");

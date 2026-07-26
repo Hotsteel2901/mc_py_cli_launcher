@@ -401,19 +401,15 @@ pub fn download_mojang_java(game_dir: &Path, component: &str, max_workers: usize
     let fail = std::sync::atomic::AtomicUsize::new(0);
 
     downloads.par_iter().for_each(|(url, dest, sha1)| {
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            http::download_file(
-                url,
-                dest,
-                "",
-                sha1.as_deref(),
-                2,
-                false,
-            );
-            true
-        }));
-        match result {
-            Ok(true) => {
+        match http::download_file(
+            url,
+            dest,
+            "",
+            sha1.as_deref(),
+            2,
+            false,
+        ) {
+            Ok(()) => {
                 let n = done.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
                 let f = fail.load(std::sync::atomic::Ordering::Relaxed);
                 let pct = (n + f) * 100 / total;
@@ -428,7 +424,7 @@ pub fn download_mojang_java(game_dir: &Path, component: &str, max_workers: usize
                 use std::io::Write;
                 std::io::stdout().flush().ok();
             }
-            _ => {
+            Err(_) => {
                 fail.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
         }
@@ -474,7 +470,7 @@ pub fn download_mojang_java(game_dir: &Path, component: &str, max_workers: usize
 fn find_java_in_dir(root: &Path, exe_name: &str) -> Option<String> {
     let pattern = format!("{}/**/bin/{}", root.display(), exe_name);
     let matches = glob::glob(&pattern).ok()?;
-    for entry in matches.flatten() {
+    if let Some(entry) = matches.flatten().next() {
         return Some(entry.to_string_lossy().to_string());
     }
     None

@@ -128,7 +128,7 @@ pub fn http_post_form(url: &str, data: &[u8]) -> HttpResult {
 }
 
 /// Download a file with progress bar and optional SHA-1 verification.
-/// Returns Ok on success; panics via die! on unrecoverable failure.
+/// Returns Ok(()) on success, or Err with an error message on failure.
 pub fn download_file(
     url: &str,
     dest: &Path,
@@ -136,7 +136,7 @@ pub fn download_file(
     sha1_expected: Option<&str>,
     max_retries: u32,
     show_progress: bool,
-) {
+) -> Result<(), String> {
     if let Some(parent) = dest.parent() {
         fs::create_dir_all(parent).ok();
     }
@@ -154,16 +154,17 @@ pub fn download_file(
     if dest.exists() {
         if let Some(expected) = sha1_expected {
             if util::sha1_file(dest) == expected {
-                return;
+                return Ok(());
             }
         } else if util::is_jar_intact(dest) {
-            return;
+            return Ok(());
         } else if dest.metadata().map(|m| m.len() > 0).unwrap_or(false) {
             crate::warn_msg!("{} appears corrupted, re-downloading...", display_label);
         }
         fs::remove_file(dest).ok();
     }
 
+    let mut last_err = String::new();
     for attempt in 0..max_retries {
         let agent = ureq::AgentBuilder::new()
             .timeout(Duration::from_secs(120))
@@ -184,7 +185,9 @@ pub fn download_file(
                     .unwrap_or(0);
 
                 let mut reader = resp.into_reader();
-                let mut file = File::create(dest).unwrap();
+                let mut file = File::create(dest).map_err(|e| {
+                    format!("Cannot create {}: {}", dest.display(), e)
+                })?;
                 let mut buf = [0u8; 65536];
                 let pb = if show_progress && total > 0 {
                     let pb = ProgressBar::new(total);
@@ -222,19 +225,18 @@ pub fn download_file(
                 if let Some(expected) = sha1_expected {
                     if util::sha1_file(dest) != expected {
                         fs::remove_file(dest).ok();
-                        crate::warn_msg!(
-                            "SHA-1 mismatch for {}, retrying...",
-                            display_label
-                        );
+                        last_err = format!("SHA-1 mismatch for {}", display_label);
+                        crate::warn_msg!("{}, retrying...", last_err);
                         continue;
                     }
                 }
-                return;
+                return Ok(());
             }
             Err(e) => {
                 if dest.exists() {
                     fs::remove_file(dest).ok();
                 }
+                last_err = format!("{}", e);
                 if attempt + 1 < max_retries {
                     let delay = 2u64.pow(attempt + 1);
                     crate::warn_msg!(
@@ -246,15 +248,12 @@ pub fn download_file(
                         delay
                     );
                     std::thread::sleep(Duration::from_secs(delay));
-                } else {
-                    crate::die!(
-                        format!(
-                            "Download failed after {} attempts: {} -- {}",
-                            max_retries, display_label, e
-                        )
-                    );
                 }
             }
         }
     }
+    Err(format!(
+        "Download failed after {} attempts: {} -- {}",
+        max_retries, display_label, last_err
+    ))
 }

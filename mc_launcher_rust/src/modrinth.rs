@@ -170,14 +170,17 @@ pub fn download_version_files(
         let url = f["url"].as_str().unwrap_or("");
 
         if !file_path.exists() {
-            http::download_file(
+            if let Err(e) = http::download_file(
                 url,
                 &file_path,
                 if label.is_empty() { filename } else { label },
                 None,
                 3,
                 true,
-            );
+            ) {
+                crate::warn_msg!("Failed to download {}: {}", filename, e);
+                continue;
+            }
         } else {
             crate::info!("{} -- cached", filename);
         }
