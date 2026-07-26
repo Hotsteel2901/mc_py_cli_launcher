@@ -137,6 +137,10 @@ fn scan_java_installations() -> Vec<String> {
         r"C:\Program Files\Microsoft",
         r"C:\Program Files\Eclipse Foundation",
         r"C:\Program Files (x86)\Java",
+        r"C:\Program Files\Zulu",
+        r"C:\Program Files\Amazon Corretto",
+        r"C:\Program Files\ojdkbuild",
+        r"C:\tools\java",
     ] {
         let bp = Path::new(base);
         if bp.exists() {
@@ -177,6 +181,7 @@ fn scan_java_installations() -> Vec<String> {
     for base in &[
         "/usr/lib/jvm",
         "/usr/local/opt",
+        "/opt/java",
     ] {
         let bp = Path::new(base);
         if bp.exists() {
@@ -214,6 +219,22 @@ fn scan_java_installations() -> Vec<String> {
     let jdks = home.join(".jdks");
     if jdks.exists() {
         if let Ok(entries) = fs::read_dir(&jdks) {
+            let mut dirs: Vec<_> = entries.flatten().collect();
+            dirs.sort_by_key(|e| e.file_name());
+            dirs.reverse();
+            for d in dirs {
+                let je = d.path().join("bin").join(java_bin);
+                if je.exists() {
+                    scanned.push(je.to_string_lossy().to_string());
+                }
+            }
+        }
+    }
+
+    // ASDF
+    let asdf = home.join(".asdf/installs/java");
+    if asdf.exists() {
+        if let Ok(entries) = fs::read_dir(&asdf) {
             let mut dirs: Vec<_> = entries.flatten().collect();
             dirs.sort_by_key(|e| e.file_name());
             dirs.reverse();

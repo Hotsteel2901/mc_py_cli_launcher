@@ -8,7 +8,7 @@ const MODRINTH_API: &str = "https://api.modrinth.com/v2";
 #[allow(dead_code)]
 const LAUNCHER_NAME: &str = "simple-mc-cli";
 #[allow(dead_code)]
-const LAUNCHER_VER: &str = "2.1.0";
+const LAUNCHER_VER: &str = env!("CARGO_PKG_VERSION");
 
 fn api_get(path: &str, params: &[(&str, &str)]) -> serde_json::Value {
     let mut serializer = url::form_urlencoded::Serializer::new(String::new());

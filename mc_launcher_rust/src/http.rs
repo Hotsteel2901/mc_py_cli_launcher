@@ -1,14 +1,16 @@
 //! HTTP client with retry logic and file download with progress.
 
 use std::fs::{self, File};
-use std::io::{self, Read, Write};
+use std::io::{Read, Write};
+
+use indicatif::{ProgressBar, ProgressStyle};
 use std::path::Path;
 use std::time::Duration;
 
 use crate::util;
 
 const LAUNCHER_NAME: &str = "simple-mc-cli";
-const LAUNCHER_VER: &str = "2.1.0";
+const LAUNCHER_VER: &str = env!("CARGO_PKG_VERSION");
 
 /// Result type: (status_code, response_body_bytes) or error string.
 pub type HttpResult = Result<(u16, Vec<u8>), String>;
@@ -184,27 +186,28 @@ pub fn download_file(
                 let mut reader = resp.into_reader();
                 let mut file = File::create(dest).unwrap();
                 let mut buf = [0u8; 65536];
-                let mut downloaded: u64 = 0;
+                let pb = if show_progress && total > 0 {
+                    let pb = ProgressBar::new(total);
+                    pb.set_style(
+                        ProgressStyle::default_bar()
+                            .template(
+                                "{msg:40} [{bar:25}] {bytes}/{total_bytes} ({eta})",
+                            )
+                            .unwrap(),
+                    );
+                    pb.set_message(display_label.clone());
+                    Some(pb)
+                } else {
+                    None
+                };
 
                 loop {
                     match reader.read(&mut buf) {
                         Ok(0) => break,
                         Ok(n) => {
                             file.write_all(&buf[..n]).ok();
-                            downloaded += n as u64;
-                            if show_progress && total > 0 {
-                                let pct = (downloaded * 100 / total).min(100) as usize;
-                                let filled = pct * 25 / 100;
-                                let bar: String = (0..25)
-                                    .map(|i| {
-                                        if i < filled { '\u{2588}' } else { '\u{2591}' }
-                                    })
-                                    .collect();
-                                print!(
-                                    "\r  {:40} {} {:3}%",
-                                    display_label, bar, pct
-                                );
-                                io::stdout().flush().ok();
+                            if let Some(ref pb) = pb {
+                                pb.inc(n as u64);
                             }
                         }
                         Err(_) => break,
@@ -212,21 +215,8 @@ pub fn download_file(
                 }
                 drop(file);
 
-                if show_progress {
-                    if total > 0 {
-                        let bar_done: String = (0..25).map(|_| '\u{2588}').collect();
-                        let mb = downloaded as f64 / 1_048_576.0;
-                        println!(
-                            "\r  {:40} {} {:.1} MB",
-                            display_label, bar_done, mb
-                        );
-                    } else {
-                        println!(
-                            "\r  {:40} done ({:.0} KB)",
-                            display_label,
-                            downloaded as f64 / 1024.0
-                        );
-                    }
+                if let Some(ref pb) = pb {
+                    pb.finish_with_message(format!("{} done", display_label));
                 }
 
                 if let Some(expected) = sha1_expected {

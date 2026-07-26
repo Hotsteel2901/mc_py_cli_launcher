@@ -5,6 +5,7 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
+use indicatif::{ProgressBar, ProgressStyle};
 use rayon::prelude::*;
 
 use crate::http;
@@ -360,11 +361,17 @@ impl VersionManager {
 
         if !all_downloads.is_empty() {
             let total = all_downloads.len();
-            let done = std::sync::atomic::AtomicUsize::new(0);
+            let pb = ProgressBar::new(total as u64);
+            pb.set_style(
+                ProgressStyle::default_bar()
+                    .template("{msg:40} [{bar:25}] {pos}/{len}")
+                    .unwrap(),
+            );
+            pb.set_message("Libraries");
 
             all_downloads.par_iter().for_each(|(url, dest, label)| {
                 if dest.exists() {
-                    done.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    pb.inc(1);
                     return;
                 }
                 let ok = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -372,30 +379,13 @@ impl VersionManager {
                     true
                 }))
                 .is_ok();
-                let n = done.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
-                let pct = n * 100 / total;
-                let filled = pct * 25 / 100;
-                let bar: String = (0..25)
-                    .map(|i| {
-                        if i < filled { '\u{2588}' } else { '\u{2591}' }
-                    })
-                    .collect();
-                print!(
-                    "\r  [{:3}%] {} {}/{} libs",
-                    pct, bar, n, total
-                );
-                use std::io::Write;
-                std::io::stdout().flush().ok();
+                pb.inc(1);
                 if !ok {
                     println!("\n    FAILED: {}", label);
                 }
             });
 
-            let bar_done: String = (0..25).map(|_| '\u{2588}').collect();
-            println!(
-                "\r  [100%] {} {}/{} libs -- done    ",
-                bar_done, total, total
-            );
+            pb.finish_with_message("Libraries done");
         }
 
         // Extract natives from downloaded jars
@@ -598,10 +588,14 @@ impl VersionManager {
         );
 
         let total_missing = missing.len();
-        let dl =
-            std::sync::atomic::AtomicUsize::new(0);
-        let fail =
-            std::sync::atomic::AtomicUsize::new(0);
+        let pb = ProgressBar::new(total_missing as u64);
+        pb.set_style(
+            ProgressStyle::default_bar()
+                .template("{msg:40} [{bar:25}] {pos}/{len}")
+                .unwrap(),
+        );
+        pb.set_message("Assets");
+        let fail = std::sync::atomic::AtomicUsize::new(0);
 
         missing.par_iter().for_each(|(url, dest)| {
             let ok = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -609,34 +603,77 @@ impl VersionManager {
                 true
             }))
             .is_ok();
-            if ok {
-                dl.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            } else {
+            if !ok {
                 fail.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
-            let done = dl.load(std::sync::atomic::Ordering::Relaxed)
-                + fail.load(std::sync::atomic::Ordering::Relaxed);
-            let pct = done * 100 / total_missing;
-            let filled = pct * 25 / 100;
-            let bar: String = (0..25)
-                .map(|i| if i < filled { '\u{2588}' } else { '\u{2591}' })
-                .collect();
-            print!(
-                "\r  [{:3}%] {} {}/{} assets",
-                pct, bar, done, total_missing
-            );
-            use std::io::Write;
-            std::io::stdout().flush().ok();
+            pb.inc(1);
         });
 
-        let bar_done: String = (0..25).map(|_| '\u{2588}').collect();
-        let dl_final = dl.load(std::sync::atomic::Ordering::Relaxed);
         let fail_final = fail.load(std::sync::atomic::Ordering::Relaxed);
-        println!(
-            "\r  [100%] {} {} new, {} failed -- done    ",
-            bar_done, dl_final, fail_final
-        );
+        pb.finish_with_message(format!(
+            "Assets done ({} new, {} failed)",
+            total_missing - fail_final,
+            fail_final
+        ));
 
         index_id.to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_rules_allow_empty() {
+        let rules = serde_json::json!([]);
+        assert!(VersionManager::rules_allow(&rules, true));
+        assert!(!VersionManager::rules_allow(&rules, false));
+    }
+
+    #[test]
+    fn test_rules_allow_os_windows() {
+        let rules = serde_json::json!([
+            {"action": "allow", "os": {"name": "windows"}},
+            {"action": "disallow", "os": {"name": "linux"}},
+            {"action": "disallow", "os": {"name": "osx"}}
+        ]);
+        let result = VersionManager::rules_allow(&rules, false);
+        // On Windows, this should be true; on Linux/macOS, false
+        let expected = cfg!(windows);
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn test_rules_allow_disallow_override() {
+        let rules = serde_json::json!([
+            {"action": "allow", "os": {"name": "linux"}},
+            {"action": "disallow", "os": {"name": "linux"}}
+        ]);
+        // Last matching rule should win
+        let result = VersionManager::rules_allow(&rules, true);
+        let expected = !cfg!(target_os = "linux");
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn test_rules_allow_with_arch() {
+        let rules = serde_json::json!([
+            {"action": "allow", "os": {"name": "linux", "arch": "x86_64"}}
+        ]);
+        let result = VersionManager::rules_allow(&rules, false);
+        let expected = cfg!(target_os = "linux") && cfg!(target_arch = "x86_64");
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn test_rules_allow_with_features() {
+        // Features rules should be skipped (match = false)
+        let rules = serde_json::json!([
+            {"action": "allow", "features": {"is_demo_user": true}}
+        ]);
+        let result = VersionManager::rules_allow(&rules, false);
+        // Features rules don't match, so default applies
+        assert!(!result);
     }
 }

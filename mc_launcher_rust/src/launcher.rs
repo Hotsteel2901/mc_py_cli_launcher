@@ -12,7 +12,7 @@ use crate::util;
 use crate::version::VersionManager;
 
 const LAUNCHER_NAME: &str = "simple-mc-cli";
-const LAUNCHER_VER: &str = "2.1.0";
+const LAUNCHER_VER: &str = env!("CARGO_PKG_VERSION");
 
 pub struct MinecraftLauncher {
     pub game_dir: PathBuf,
@@ -639,7 +639,13 @@ impl MinecraftLauncher {
                     "legacy".into()
                 },
             ),
-            ("${user_properties}", "{}".into()),
+            (
+                "${user_properties}",
+                account_data
+                    .get("user_properties")
+                    .map(|v| v.to_string())
+                    .unwrap_or_else(|| "{}".to_string()),
+            ),
             ("${version_name}", mc_version.clone()),
             (
                 "${version_type}",
@@ -695,6 +701,12 @@ impl MinecraftLauncher {
 
         replace_tokens(&mut jvm_args, &replacements);
         replace_tokens(&mut game_args, &replacements);
+
+        for arg in jvm_args.iter().chain(game_args.iter()) {
+            if arg.contains("${") {
+                crate::debug_msg!("Unresolved token: {}", arg);
+            }
+        }
 
         // Ensure -cp is present
         if !jvm_args

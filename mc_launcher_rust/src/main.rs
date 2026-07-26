@@ -5,12 +5,14 @@
 
 mod account;
 mod auth;
+mod error;
 mod fabric;
 mod forge;
 mod http;
 mod java;
 pub mod log;
 mod launcher;
+mod loader;
 mod mod_manager;
 mod modrinth;
 mod neoforge;
@@ -53,7 +55,7 @@ fn parse_ram(value: &str) -> Result<u32, String> {
 
 fn main() {
     let matches = Command::new("mc-launcher")
-        .version("2.1.0")
+        .version(env!("CARGO_PKG_VERSION"))
         .about(
             "Simple Minecraft CLI Launcher -- Microsoft + offline + \
              Fabric/Forge/NeoForge + Modrinth mods",
@@ -739,7 +741,8 @@ fn cmd_install_fabric(
     crate::info!("Target MC version: {}", mc_version);
 
     let fm = FabricManager::new(game_dir);
-    let (all_jars, profile) = fm.install(&mc_version, loader_version);
+    let (all_jars, profile) = fm.install(&mc_version, loader_version)
+        .unwrap_or_else(|e| crate::die!(format!("Fabric install failed: {}", e)));
 
     crate::success!("Fabric Loader installed successfully!");
     println!("    MC Version: {}", mc_version);
@@ -765,7 +768,8 @@ fn cmd_install_forge(
     crate::info!("Target MC version: {}", mc_version);
 
     let fm = ForgeManager::new(game_dir);
-    let (installed_id, profile) = fm.install(&mc_version, loader_version);
+    let (installed_id, profile) = fm.install(&mc_version, loader_version)
+        .unwrap_or_else(|e| crate::die!(format!("Forge install failed: {}", e)));
 
     crate::success!("Forge Loader installed successfully!");
     println!("    MC Version: {}", mc_version);
@@ -790,7 +794,8 @@ fn cmd_install_neoforge(
     crate::info!("Target MC version: {}", mc_version);
 
     let nm = NeoForgeManager::new(game_dir);
-    let (installed_id, profile) = nm.install(&mc_version, loader_version);
+    let (installed_id, profile) = nm.install(&mc_version, loader_version)
+        .unwrap_or_else(|e| crate::die!(format!("NeoForge install failed: {}", e)));
 
     crate::success!("NeoForge Loader installed successfully!");
     println!("    MC Version: {}", mc_version);

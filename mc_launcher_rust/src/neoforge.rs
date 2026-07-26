@@ -3,6 +3,9 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use serde::Deserialize;
+
+use crate::error::{AppError, AppResult};
 use crate::http;
 use crate::java;
 use crate::version::VersionManager;
@@ -11,6 +14,21 @@ const NEOFORGE_MAVEN: &str =
     "https://maven.neoforged.net/releases/net/neoforged/neoforge";
 const NEOFORGE_MAVEN_META: &str =
     "https://maven.neoforged.net/releases/net/neoforged/neoforge/maven-metadata.xml";
+
+#[derive(Debug, Deserialize)]
+struct Metadata {
+    versioning: Versioning,
+}
+
+#[derive(Debug, Deserialize)]
+struct Versioning {
+    versions: Versions,
+}
+
+#[derive(Debug, Deserialize)]
+struct Versions {
+    version: Vec<String>,
+}
 
 pub struct NeoForgeManager {
     pub game_dir: PathBuf,
@@ -47,47 +65,42 @@ impl NeoForgeManager {
     }
 
     /// Get available NeoForge versions for a Minecraft version.
-    pub fn get_available_versions(&self, mc_version: &str) -> Vec<String> {
-        let (status, body) =
-            http::http_get(NEOFORGE_MAVEN_META).unwrap_or_else(|e| {
-                crate::die!(format!("NeoForge maven metadata fetch failed: {}", e));
-            });
+    pub fn get_available_versions(&self, mc_version: &str) -> AppResult<Vec<String>> {
+        let (status, body) = http::http_get(NEOFORGE_MAVEN_META)
+            .map_err(|e| AppError::Loader(format!("NeoForge maven metadata fetch failed: {}", e)))?;
         if status != 200 {
-            crate::die!(format!(
+            return Err(AppError::Loader(format!(
                 "NeoForge maven metadata fetch failed ({})",
                 status
-            ));
+            )));
         }
 
-        let prefix = NeoForgeManager::neoforge_prefix_for_mc(mc_version);
-        let prefix = match prefix {
-            Some(p) => p,
-            None => {
-                crate::die!(format!(
+        let prefix = NeoForgeManager::neoforge_prefix_for_mc(mc_version)
+            .ok_or_else(|| {
+                AppError::Loader(format!(
                     "Cannot determine NeoForge versions for Minecraft {}. Specify --loader-version.",
                     mc_version
-                ));
-            }
-        };
+                ))
+            })?;
 
         let text = String::from_utf8_lossy(&body);
-        let version_re =
-            regex::Regex::new(r"<version>([^<]+)</version>").unwrap();
+        let metadata: Metadata = quick_xml::de::from_str(&text)
+            .map_err(|e| AppError::Loader(format!("Failed to parse NeoForge maven metadata: {}", e)))?;
 
-        let mut versions: Vec<String> = version_re
-            .captures_iter(&text)
-            .filter_map(|c| c.get(1))
-            .map(|m| m.as_str().to_string())
-            .filter(|v| {
+        let mut versions: Vec<String> = metadata
+            .versioning
+            .versions
+            .version
+            .into_iter()
+            .filter(|v: &String| {
                 if v.starts_with(&prefix) {
                     let rest = &v[prefix.len()..];
-                    // Must be followed by digit or period-digit for proper prefix match
                     if prefix.ends_with('.') || prefix.ends_with('-') {
-                        rest.chars().next().map_or(false, |c| c.is_ascii_digit())
+                        rest.chars().next().map_or(false, |c: char| c.is_ascii_digit())
                     } else {
                         rest.starts_with('.')
                             && rest.len() > 1
-                            && rest.chars().nth(1).map_or(false, |c| {
+                            && rest.chars().nth(1).map_or(false, |c: char| {
                                 c.is_ascii_digit()
                             })
                     }
@@ -113,7 +126,7 @@ impl NeoForgeManager {
             nums_a.cmp(&nums_b)
         });
 
-        versions
+        Ok(versions)
     }
 
     fn installer_url(&self, loader_version: &str) -> String {
@@ -123,7 +136,7 @@ impl NeoForgeManager {
         )
     }
 
-    fn ensure_base_game(&self, mc_version: &str) {
+    fn ensure_base_game(&self, mc_version: &str) -> AppResult<()> {
         let vm = VersionManager::new(&self.game_dir);
         let (version_id, version_data) = vm.get_version_info(Some(mc_version));
         vm.download_client_jar(&version_id, &version_data);
@@ -131,6 +144,7 @@ impl NeoForgeManager {
         if !profile_path.exists() {
             std::fs::write(&profile_path, "{}").ok();
         }
+        Ok(())
     }
 
     /// Install NeoForge loader.
@@ -138,21 +152,21 @@ impl NeoForgeManager {
         &self,
         mc_version: &str,
         loader_version_id: Option<&str>,
-    ) -> (String, serde_json::Value) {
-        let versions = self.get_available_versions(mc_version);
+    ) -> AppResult<(String, serde_json::Value)> {
+        let versions = self.get_available_versions(mc_version)?;
         if versions.is_empty() {
-            crate::die!(format!(
+            return Err(AppError::Loader(format!(
                 "No NeoForge loader found for Minecraft {}",
                 mc_version
-            ));
+            )));
         }
 
         let loader_ver = if let Some(lv) = loader_version_id {
             if !versions.contains(&lv.to_string()) {
-                crate::die!(format!(
+                return Err(AppError::Loader(format!(
                     "NeoForge loader version '{}' not found.",
                     lv
-                ));
+                )));
             }
             lv.to_string()
         } else {
@@ -164,7 +178,7 @@ impl NeoForgeManager {
             loader_ver,
             mc_version
         );
-        self.ensure_base_game(mc_version);
+        self.ensure_base_game(mc_version)?;
 
         let installer_url = self.installer_url(&loader_ver);
         let installer_path = self.lib_dir.join("neoforge").join(format!(
@@ -183,9 +197,9 @@ impl NeoForgeManager {
             true,
         );
 
-        let java_path = java::check_java(None).unwrap_or_else(|| {
-            crate::die!("Java not found. Cannot run NeoForge installer.");
-        });
+        let java_path = java::check_java(None).ok_or_else(|| {
+            AppError::Loader("Java not found. Cannot run NeoForge installer.".to_string())
+        })?;
 
         crate::info!("Running NeoForge installer (this may take a while)...");
         let status = Command::new(&java_path)
@@ -194,15 +208,13 @@ impl NeoForgeManager {
             .arg("--installClient")
             .arg(&self.game_dir)
             .status()
-            .unwrap_or_else(|e| {
-                crate::die!(format!("Failed to run NeoForge installer: {}", e));
-            });
+            .map_err(|e| AppError::Loader(format!("Failed to run NeoForge installer: {}", e)))?;
 
         if !status.success() {
-            crate::die!(format!(
+            return Err(AppError::Loader(format!(
                 "NeoForge installer failed (exit {})",
                 status.code().unwrap_or(-1)
-            ));
+            )));
         }
 
         // Find the installed version JSON
@@ -235,9 +247,9 @@ impl NeoForgeManager {
         }
 
         if !version_json_path.exists() {
-            crate::die!(
-                "NeoForge installer finished but version.json was not found."
-            );
+            return Err(AppError::Loader(
+                "NeoForge installer finished but version.json was not found.".to_string(),
+            ));
         }
 
         let installed_id = version_json_path
@@ -252,7 +264,7 @@ impl NeoForgeManager {
             mc_version,
             &installed_id,
             &version_json_path,
-        );
+        )?;
 
         let profile_path = self
             .lib_dir
@@ -272,7 +284,7 @@ impl NeoForgeManager {
             loader_ver,
             mc_version
         );
-        (installed_id, profile)
+        Ok((installed_id, profile))
     }
 
     fn build_profile(
@@ -280,34 +292,35 @@ impl NeoForgeManager {
         mc_version: &str,
         version_id: &str,
         version_json_path: &Path,
-    ) -> serde_json::Value {
+    ) -> AppResult<serde_json::Value> {
         let version_data: serde_json::Value = serde_json::from_str(
-            &std::fs::read_to_string(version_json_path).unwrap(),
+            &std::fs::read_to_string(version_json_path)
+                .map_err(|e| AppError::Loader(format!("Failed to read version JSON: {}", e)))?,
         )
-        .unwrap();
+        .map_err(|e| AppError::Loader(format!("Failed to parse version JSON: {}", e)))?;
         let merged = self.resolve_inherits(
             &version_data,
             &self.game_dir.join("versions"),
-        );
+        )?;
 
-        serde_json::json!({
+        Ok(serde_json::json!({
             "loader": "neoforge",
             "mc_version": mc_version,
             "version_id": version_id,
             "mainClass": merged["mainClass"],
             "libraries": merged["libraries"],
             "arguments": merged["arguments"],
-        })
+        }))
     }
 
     fn resolve_inherits(
         &self,
         version_data: &serde_json::Value,
         versions_dir: &Path,
-    ) -> serde_json::Value {
+    ) -> AppResult<serde_json::Value> {
         let parent_id = version_data["inheritsFrom"].as_str();
         if parent_id.is_none() {
-            return version_data.clone();
+            return Ok(version_data.clone());
         }
         let parent_id = parent_id.unwrap();
         let parent_path = versions_dir
@@ -319,14 +332,15 @@ impl NeoForgeManager {
                 "Parent version {} not found; NeoForge may not launch.",
                 parent_id
             );
-            return version_data.clone();
+            return Ok(version_data.clone());
         }
 
         let parent: serde_json::Value = serde_json::from_str(
-            &std::fs::read_to_string(&parent_path).unwrap(),
+            &std::fs::read_to_string(&parent_path)
+                .map_err(|e| AppError::Loader(format!("Failed to read parent version JSON: {}", e)))?,
         )
-        .unwrap();
-        let merged_parent = self.resolve_inherits(&parent, versions_dir);
+        .map_err(|e| AppError::Loader(format!("Failed to parse parent version JSON: {}", e)))?;
+        let merged_parent = self.resolve_inherits(&parent, versions_dir)?;
 
         let mut merged = merged_parent.clone();
         if let Some(obj) = version_data.as_object() {
@@ -347,6 +361,43 @@ impl NeoForgeManager {
         }
         merged["libraries"] = serde_json::Value::Array(all_libs);
 
-        merged
+        Ok(merged)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_neoforge_prefix_for_mc_1_21_4() {
+        let prefix = NeoForgeManager::neoforge_prefix_for_mc("1.21.4");
+        assert_eq!(prefix, Some("21.4".to_string()));
+    }
+
+    #[test]
+    fn test_neoforge_prefix_for_mc_1_21() {
+        let prefix = NeoForgeManager::neoforge_prefix_for_mc("1.21");
+        assert_eq!(prefix, Some("21.0".to_string()));
+    }
+
+    #[test]
+    fn test_neoforge_prefix_for_mc_1_20_4() {
+        let prefix = NeoForgeManager::neoforge_prefix_for_mc("1.20.4");
+        assert_eq!(prefix, Some("20.4".to_string()));
+    }
+
+    #[test]
+    fn test_neoforge_prefix_for_mc_1_20_1() {
+        // 1.20.1 uses net.neoforged:forge, not neoforge
+        let prefix = NeoForgeManager::neoforge_prefix_for_mc("1.20.1");
+        assert_eq!(prefix, None);
+    }
+
+    #[test]
+    fn test_neoforge_prefix_for_mc_1_19_4() {
+        // Below 1.20, not supported
+        let prefix = NeoForgeManager::neoforge_prefix_for_mc("1.19.4");
+        assert_eq!(prefix, None);
     }
 }

@@ -580,12 +580,27 @@ impl ModManager {
             }
         }
 
-        println!();
         if !required_missing.is_empty() {
             crate::warn_msg!(
                 "{} required dependency(ies) missing. Install them first, or the mod may not load.",
                 required_missing.len()
             );
+            
+            // Auto-install required dependencies
+            print!("\n  Auto-install missing dependencies? [y/N]: ");
+            use std::io::{self, Write};
+            io::stdout().flush().ok();
+            let mut answer = String::new();
+            if io::stdin().read_line(&mut answer).is_ok() {
+                let answer = answer.trim().to_lowercase();
+                if answer == "y" || answer == "yes" {
+                    for (title, slug, _ver, _mc) in &required_missing {
+                        crate::info!("Installing dependency: {} ({})", title, slug);
+                        self.install(slug, mc_version, loader, None);
+                        crate::success!("Installed: {}", title);
+                    }
+                }
+            }
         }
         println!();
     }
