@@ -271,10 +271,7 @@ pub fn check_java(required_major: Option<u32>) -> Option<String> {
     }
 
     if candidates.is_empty() {
-        crate::die!(
-            "Java not found. Install Java 17+ from https://adoptium.net/",
-            "If you already installed Java, set JAVA_HOME."
-        );
+        return None;
     }
 
     let java = &candidates[0];

@@ -5,6 +5,7 @@ use std::process::{Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::auth::MicrosoftAuth;
+use crate::error::{AppError, AppResult};
 use crate::http;
 use crate::java;
 use crate::mod_manager::ModManager;
@@ -39,19 +40,19 @@ impl MinecraftLauncher {
     }
 
     /// Get the Java executable, auto-detecting if necessary.
-    pub fn java(&mut self) -> String {
+    pub fn java(&mut self) -> AppResult<String> {
         if let Some(ref j) = self.java_path {
-            return j.clone();
+            return Ok(j.clone());
         }
-        let j = java::check_java(None).unwrap_or_else(|| {
-            crate::die!("Java not found. Install Java 17+ from https://adoptium.net/");
-        });
+        let j = java::check_java(None).ok_or_else(|| {
+            AppError::Generic("Java not found. Install Java 17+ from https://adoptium.net/".into())
+        })?;
         self.java_path = Some(j.clone());
-        j
+        Ok(j)
     }
 
     /// Select Java matching the version's required major version.
-    fn select_java(&mut self, version_data: &serde_json::Value) -> String {
+    fn select_java(&mut self, version_data: &serde_json::Value) -> AppResult<String> {
         let jv = &version_data["javaVersion"];
         let required = jv["majorVersion"].as_u64();
         let component = jv["component"]
@@ -72,7 +73,7 @@ impl MinecraftLauncher {
                     }
                 }
             }
-            return explicit.clone();
+            return Ok(explicit.clone());
         }
 
         // No specific requirement — use default
@@ -84,7 +85,7 @@ impl MinecraftLauncher {
         // Try to find an exact match
         if let Some(j) = java::check_java(Some(required)) {
             self.java_path = Some(j.clone());
-            return j;
+            return Ok(j);
         }
 
         // Try cached Mojang runtime
@@ -103,7 +104,7 @@ impl MinecraftLauncher {
 
         if let Some(j) = cached {
             self.java_path = Some(j.clone());
-            return j;
+            return Ok(j);
         }
 
         // Download Mojang runtime
@@ -117,7 +118,7 @@ impl MinecraftLauncher {
             self.threads,
         ) {
             self.java_path = Some(j.clone());
-            return j;
+            return Ok(j);
         }
 
         // Fallback to system Java
@@ -133,7 +134,7 @@ impl MinecraftLauncher {
         &self,
         mc_version: &str,
         loader: Option<&str>,
-    ) -> (Option<String>, Option<serde_json::Value>) {
+    ) -> AppResult<(Option<String>, Option<serde_json::Value>)> {
         if let Some(l) = loader {
             let path = self
                 .game_dir
@@ -150,7 +151,7 @@ impl MinecraftLauncher {
                                 path.display(),
                                 e
                             );
-                            return (None, None);
+                            return Ok((None, None));
                         }
                     },
                     Err(e) => {
@@ -159,26 +160,20 @@ impl MinecraftLauncher {
                             path.display(),
                             e
                         );
-                        return (None, None);
+                        return Ok((None, None));
                     }
                 };
-                return (Some(l.to_string()), Some(profile));
+                return Ok((Some(l.to_string()), Some(profile)));
             }
             let install_cmd = if l == "fabric" {
                 "install-fabric"
             } else {
                 &format!("install-{}", l)[..]
             };
-            crate::die!(
-                format!(
-                    "--{} requested but no {} profile found for {}.",
-                    l, l, mc_version
-                ),
-                &format!(
-                    "Install it first: mc-launcher {} -v {}",
-                    install_cmd, mc_version
-                )
-            );
+            return Err(AppError::Loader(format!(
+                "--{} requested but no {} profile found for {}.\nInstall it first: mc-launcher {} -v {}",
+                l, l, mc_version, install_cmd, mc_version
+            )));
         }
 
         // Auto-detect
@@ -210,18 +205,18 @@ impl MinecraftLauncher {
                         continue;
                     }
                 };
-                return (Some(candidate.to_string()), Some(profile));
+                return Ok((Some(candidate.to_string()), Some(profile)));
             }
         }
 
-        (None, None)
+        Ok((None, None))
     }
 
     /// Ensure the session is valid (refresh if needed).
     fn ensure_session(
         &mut self,
         account_data: &mut serde_json::Value,
-    ) -> (String, String, String, String) {
+    ) -> AppResult<(String, String, String, String)> {
         let acc_type = account_data["type"].as_str().unwrap_or("offline").to_string();
         let username = account_data["username"]
             .as_str()
@@ -245,9 +240,9 @@ impl MinecraftLauncher {
                     .unwrap_or("")
                     .to_string();
                 if !auth.try_refresh(&refresh) {
-                    crate::die!(
-                        "Token refresh failed. Run 'login' again to re-authenticate."
-                    );
+                    return Err(AppError::Generic(
+                        "Token refresh failed. Run 'login' again to re-authenticate.".into()
+                    ));
                 }
 
                 // Update account_data in memory with new token
@@ -275,7 +270,7 @@ impl MinecraftLauncher {
             "0".to_string()
         };
 
-        (acc_type, username, user_uuid, access_token)
+        Ok((acc_type, username, user_uuid, access_token))
     }
 
     /// Launch Minecraft.
@@ -287,7 +282,7 @@ impl MinecraftLauncher {
         loader: Option<&str>,
         width: Option<u32>,
         height: Option<u32>,
-    ) -> i32 {
+    ) -> AppResult<i32> {
         let mut account_data = account_data.unwrap_or_else(|| {
             self.accounts
                 .get_default()
@@ -297,10 +292,10 @@ impl MinecraftLauncher {
         });
 
         let (acc_type, username, user_uuid, access_token) =
-            self.ensure_session(&mut account_data);
+            self.ensure_session(&mut account_data)?;
 
         let (version_id_str, version_data) =
-            self.versions.get_version_info(version_id);
+            self.versions.get_version_info(version_id)?;
         let mc_version = &version_id_str;
 
         let version_game_dir = self
@@ -310,7 +305,7 @@ impl MinecraftLauncher {
         std::fs::create_dir_all(&version_game_dir).ok();
 
         let (loader_name, loader_profile) =
-            self.load_loader_profile(mc_version, loader);
+            self.load_loader_profile(mc_version, loader)?;
 
         if let Some(ref ln) = loader_name {
             let title = match ln.as_str() {
@@ -334,7 +329,7 @@ impl MinecraftLauncher {
         crate::log::step(1, 4, "Downloading client jar...");
         let client_jar =
             self.versions
-                .download_client_jar(mc_version, &version_data);
+                .download_client_jar(mc_version, &version_data)?;
 
         let natives_dir = self.game_dir.join("natives").join(mc_version);
         std::fs::create_dir_all(&natives_dir).ok();
@@ -344,11 +339,11 @@ impl MinecraftLauncher {
             &version_data,
             &natives_dir,
             self.threads,
-        );
+        )?;
 
         crate::log::step(3, 4, "Downloading assets...");
         let assets_index =
-            self.versions.download_assets(&version_data, self.threads);
+            self.versions.download_assets(&version_data, self.threads)?;
 
         crate::log::step(4, 4, "Launching game...");
 
@@ -763,7 +758,7 @@ impl MinecraftLauncher {
         }
 
         // Get Java
-        let java_path = self.select_java(&version_data);
+        let java_path = self.select_java(&version_data)?;
         let java_ver = java::java_major(&java_path);
 
         let mut cmd_parts: Vec<String> = Vec::with_capacity(
@@ -793,9 +788,7 @@ impl MinecraftLauncher {
             .stdout(Stdio::inherit())
             .stderr(Stdio::inherit())
             .spawn()
-            .unwrap_or_else(|e| {
-                crate::die!(format!("Failed to start Minecraft: {}", e));
-            });
+            .map_err(|e| AppError::Generic(format!("Failed to start Minecraft: {}", e)))?;
 
         let pid = child.id();
         crate::success!("Minecraft PID: {}", pid);
@@ -806,7 +799,7 @@ impl MinecraftLauncher {
             std::process::ExitStatus::default()
         });
 
-        status.code().unwrap_or(0)
+        Ok(status.code().unwrap_or(0))
     }
 
     /// Download a Minecraft version without launching.
@@ -814,9 +807,9 @@ impl MinecraftLauncher {
         &mut self,
         version_id: Option<&str>,
         skip_assets: bool,
-    ) -> (String, serde_json::Value) {
+    ) -> AppResult<(String, serde_json::Value)> {
         let (version_id, version_data) =
-            self.versions.get_version_info(version_id);
+            self.versions.get_version_info(version_id)?;
 
         let version_game_dir = self
             .game_dir
@@ -831,7 +824,7 @@ impl MinecraftLauncher {
         println!("[1/3] Client jar...");
         let jar = self
             .versions
-            .download_client_jar(&version_id, &version_data);
+            .download_client_jar(&version_id, &version_data)?;
         let jar_mb = jar.metadata().map(|m| m.len()).unwrap_or(0) as f64 / 1_048_576.0;
         println!("       {}  ({:.1} MB)", jar.display(), jar_mb);
 
@@ -845,7 +838,7 @@ impl MinecraftLauncher {
             &version_data,
             &natives_dir,
             self.threads,
-        );
+        )?;
         let lib_count = lib_jars.len();
         let lib_mb: f64 = lib_jars
             .iter()
@@ -859,7 +852,7 @@ impl MinecraftLauncher {
         } else {
             println!("[3/3] Assets...");
             self.versions
-                .download_assets(&version_data, self.threads);
+                .download_assets(&version_data, self.threads)?;
         }
 
         let total_mb = jar_mb + lib_mb;
@@ -915,7 +908,7 @@ impl MinecraftLauncher {
             }
         }
 
-        (version_id, version_data)
+        Ok((version_id, version_data))
     }
 
     #[allow(dead_code)]

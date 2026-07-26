@@ -138,8 +138,8 @@ impl NeoForgeManager {
 
     fn ensure_base_game(&self, mc_version: &str) -> AppResult<()> {
         let vm = VersionManager::new(&self.game_dir);
-        let (version_id, version_data) = vm.get_version_info(Some(mc_version));
-        vm.download_client_jar(&version_id, &version_data);
+        let (version_id, version_data) = vm.get_version_info(Some(mc_version))?;
+        vm.download_client_jar(&version_id, &version_data)?;
         let profile_path = self.game_dir.join("launcher_profiles.json");
         if !profile_path.exists() {
             std::fs::write(&profile_path, "{}").ok();

@@ -10,6 +10,7 @@ use rayon::prelude::*;
 
 use std::sync::{Arc, Mutex};
 
+use crate::error::{AppError, AppResult};
 use crate::http;
 use crate::util;
 
@@ -34,7 +35,7 @@ impl VersionManager {
     }
 
     /// Fetch (or use cached) Minecraft version manifest.
-    pub fn fetch_manifest(&self) -> serde_json::Value {
+    pub fn fetch_manifest(&self) -> AppResult<serde_json::Value> {
         let manifest_path = self.game_dir.join("version_manifest_v2.json");
 
         // Use cache if less than 5 minutes old
@@ -45,7 +46,7 @@ impl VersionManager {
                         if elapsed.as_secs() < 300 {
                             if let Ok(data) = fs::read_to_string(&manifest_path) {
                                 if let Ok(json) = serde_json::from_str(&data) {
-                                    return json;
+                                    return Ok(json);
                                 }
                             }
                         }
@@ -54,28 +55,30 @@ impl VersionManager {
             }
         }
 
-        let (status, body) = http::http_get(MC_MANIFEST).unwrap_or_else(|e| {
-            crate::die!(format!("Cannot fetch version manifest: {}", e));
-        });
+        let (status, body) = http::http_get(MC_MANIFEST)
+            .map_err(|e| AppError::Http(format!("Cannot fetch version manifest: {}", e)))?;
         if status != 200 {
             let hint = String::from_utf8_lossy(&body)
                 .chars()
                 .take(300)
                 .collect::<String>();
-            crate::die!(format!("Cannot fetch version manifest ({})", status), &hint);
+            return Err(AppError::Http(format!(
+                "Cannot fetch version manifest ({}) -- {}",
+                status, hint
+            )));
         }
 
         fs::create_dir_all(&self.game_dir).ok();
         fs::write(&manifest_path, &body).ok();
-        serde_json::from_slice(&body).unwrap()
+        Ok(serde_json::from_slice(&body)?)
     }
 
     /// Get version info for a specific version ID (or "latest" / "latest-snapshot").
     pub fn get_version_info(
         &self,
         version_id: Option<&str>,
-    ) -> (String, serde_json::Value) {
-        let manifest = self.fetch_manifest();
+    ) -> AppResult<(String, serde_json::Value)> {
+        let manifest = self.fetch_manifest()?;
         let mut vid = version_id.unwrap_or("latest").to_string();
 
         if vid == "latest" {
@@ -102,7 +105,10 @@ impl VersionManager {
                     .unwrap_or_default();
 
                 let hint = format!("Available (Mojang): {}...", avail.join(", "));
-                crate::die!(format!("Version '{}' not found.", vid), &hint);
+                return Err(AppError::Generic(format!(
+                    "Version '{}' not found. {}",
+                    vid, hint
+                )));
             }
         };
 
@@ -117,13 +123,16 @@ impl VersionManager {
                 3,
                 true,
             ) {
-                crate::die!(format!("Cannot download version manifest: {}", e));
+                return Err(AppError::Http(format!(
+                    "Cannot download version manifest: {}",
+                    e
+                )));
             }
         }
 
         let version_data: serde_json::Value =
-            serde_json::from_str(&fs::read_to_string(&json_path).unwrap()).unwrap();
-        (vid, version_data)
+            serde_json::from_str(&fs::read_to_string(&json_path)?)?;
+        Ok((vid, version_data))
     }
 
     /// Download the client JAR for a version.
@@ -131,13 +140,13 @@ impl VersionManager {
         &self,
         version_id: &str,
         version_data: &serde_json::Value,
-    ) -> PathBuf {
+    ) -> AppResult<PathBuf> {
         let jar_path = self
             .versions_dir
             .join(version_id)
             .join(format!("{}.jar", version_id));
         if jar_path.exists() {
-            return jar_path;
+            return Ok(jar_path);
         }
         let url = version_data["downloads"]["client"]["url"]
             .as_str()
@@ -154,9 +163,9 @@ impl VersionManager {
             3,
             true,
         ) {
-            crate::die!(format!("Cannot download client jar: {}", e));
+            return Err(AppError::Http(format!("Cannot download client jar: {}", e)));
         }
-        jar_path
+        Ok(jar_path)
     }
 
     /// Determine if a native library classifier matches current OS/arch.
@@ -244,10 +253,10 @@ impl VersionManager {
         version_data: &serde_json::Value,
         natives_dir: &Path,
         max_workers: usize,
-    ) -> Vec<PathBuf> {
+    ) -> AppResult<Vec<PathBuf>> {
         let libs = version_data["libraries"].as_array();
         if libs.is_none() {
-            return Vec::new();
+            return Ok(Vec::new());
         }
         let libs = libs.unwrap();
         let osn = util::os_name();
@@ -393,10 +402,11 @@ impl VersionManager {
 
             let failed = Arc::try_unwrap(failed).unwrap().into_inner().unwrap();
             if !failed.is_empty() {
-                crate::die!(
-                    format!("Failed to download {} library(s):", failed.len()),
-                    &failed.join("\n    ")
-                );
+                return Err(AppError::Http(format!(
+                    "Failed to download {} library(s):\n    {}",
+                    failed.len(),
+                    failed.join("\n    ")
+                )));
             }
         }
 
@@ -478,7 +488,7 @@ impl VersionManager {
             }
         }
 
-        all_jars
+        Ok(all_jars)
     }
 
     /// Extract native libraries (dll, so, dylib) from a JAR file.
@@ -564,13 +574,13 @@ impl VersionManager {
         &self,
         version_data: &serde_json::Value,
         max_workers: usize,
-    ) -> String {
+    ) -> AppResult<String> {
         let asset_index = &version_data["assetIndex"];
         if asset_index.is_null() {
-            return version_data["assets"]
+            return Ok(version_data["assets"]
                 .as_str()
                 .unwrap_or("legacy")
-                .to_string();
+                .to_string());
         }
 
         let index_id = asset_index["id"].as_str().unwrap_or("");
@@ -589,7 +599,7 @@ impl VersionManager {
                 3,
                 true,
             ) {
-                crate::die!(format!("Cannot download asset index: {}", e));
+                return Err(AppError::Http(format!("Cannot download asset index: {}", e)));
             }
         }
 
@@ -598,7 +608,7 @@ impl VersionManager {
                 .unwrap();
         let objects = index_data["objects"].as_object();
         if objects.is_none() {
-            return index_id.to_string();
+            return Ok(index_id.to_string());
         }
         let objects = objects.unwrap();
         let total = objects.len();
@@ -619,7 +629,7 @@ impl VersionManager {
 
         if missing.is_empty() {
             crate::info!("Assets: all {} up to date.", total);
-            return index_id.to_string();
+            return Ok(index_id.to_string());
         }
 
         crate::info!(
@@ -652,13 +662,14 @@ impl VersionManager {
 
         let failed = Arc::try_unwrap(failed).unwrap().into_inner().unwrap();
         if !failed.is_empty() {
-            crate::die!(
-                format!("Failed to download {} asset(s):", failed.len()),
-                &failed.join("\n    ")
-            );
+            return Err(AppError::Http(format!(
+                "Failed to download {} asset(s):\n    {}",
+                failed.len(),
+                failed.join("\n    ")
+            )));
         }
 
-        index_id.to_string()
+        Ok(index_id.to_string())
     }
 }
 

@@ -924,13 +924,17 @@ fn cmd_login(launcher: &mut MinecraftLauncher, device_code: bool) {
     let mut auth = MicrosoftAuth::new();
 
     if device_code {
-        auth.device_code_login();
+        auth.device_code_login().unwrap_or_else(|e| {
+            crate::die!(format!("Login failed: {}", e));
+        });
     } else {
         crate::log::header("Microsoft Login (Browser)");
         crate::info!("A browser window will open. Log in with your Microsoft account.");
         crate::info!("Make sure your Microsoft account owns Minecraft!\n");
         crate::info!("Tip: use --device-code for device code login.\n");
-        auth.login();
+        auth.login().unwrap_or_else(|e| {
+            crate::die!(format!("Login failed: {}", e));
+        });
     }
 
     let uid = crate::util::format_uuid(&auth.uuid);
@@ -963,7 +967,11 @@ fn cmd_download(
     no_assets: bool,
 ) {
     crate::log::header("Download Only");
-    launcher.download_version(mc_version, no_assets);
+    launcher
+        .download_version(mc_version, no_assets)
+        .unwrap_or_else(|e| {
+            crate::die!(format!("Download failed: {}", e));
+        });
 }
 
 fn cmd_play(
@@ -981,7 +989,12 @@ fn cmd_play(
         );
     });
 
-    launcher.launch(mc_version, Some(account), ram_mb, loader, width, height);
+    let exit_code = launcher
+        .launch(mc_version, Some(account), ram_mb, loader, width, height)
+        .unwrap_or_else(|e| {
+            crate::die!(format!("Launch failed: {}", e));
+        });
+    std::process::exit(exit_code);
 }
 
 // ─── helpers ───────────────────────────────────────────────────────
@@ -1010,7 +1023,9 @@ fn resolve_mc_version_or_latest(
 ) -> String {
     if let Some(v) = mc_version {
         let vm = VersionManager::new(game_dir);
-        let manifest = vm.fetch_manifest();
+        let manifest = vm.fetch_manifest().unwrap_or_else(|e| {
+            crate::die!(format!("Cannot fetch version manifest: {}", e));
+        });
         let known: std::collections::HashSet<String> = manifest["versions"]
             .as_array()
             .map(|arr| {
@@ -1042,7 +1057,9 @@ fn resolve_mc_version_or_latest(
     }
 
     let vm = VersionManager::new(game_dir);
-    let manifest = vm.fetch_manifest();
+    let manifest = vm.fetch_manifest().unwrap_or_else(|e| {
+        crate::die!(format!("Cannot fetch version manifest: {}", e));
+    });
     manifest["latest"]["release"]
         .as_str()
         .unwrap_or("1.21.4")

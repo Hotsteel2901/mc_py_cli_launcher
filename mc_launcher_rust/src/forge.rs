@@ -114,14 +114,15 @@ impl ForgeManager {
     }
 
     /// Ensure base game files exist.
-    fn ensure_base_game(&self, mc_version: &str) {
+    fn ensure_base_game(&self, mc_version: &str) -> AppResult<()> {
         let vm = VersionManager::new(&self.game_dir);
-        let (version_id, version_data) = vm.get_version_info(Some(mc_version));
-        vm.download_client_jar(&version_id, &version_data);
+        let (version_id, version_data) = vm.get_version_info(Some(mc_version))?;
+        vm.download_client_jar(&version_id, &version_data)?;
         let profile_path = self.game_dir.join("launcher_profiles.json");
         if !profile_path.exists() {
             std::fs::write(&profile_path, "{}").ok();
         }
+        Ok(())
     }
 
     /// Install Forge loader.
@@ -164,7 +165,7 @@ impl ForgeManager {
             loader_ver,
             mc_version
         );
-        self.ensure_base_game(mc_version);
+        self.ensure_base_game(mc_version)?;
 
         let installer_url = self.installer_url(mc_version, &loader_ver);
         let installer_path = self.lib_dir.join("forge").join(format!(
