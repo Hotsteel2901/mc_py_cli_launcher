@@ -235,10 +235,21 @@ impl MinecraftLauncher {
             if now > account_data["expires_at"].as_f64().unwrap_or(0.0) {
                 crate::info!("Session expired. Attempting silent token refresh...");
                 let mut auth = MicrosoftAuth::new();
-                let refresh = account_data["refresh_token"]
+                let mut refresh = account_data["refresh_token"]
                     .as_str()
                     .unwrap_or("")
                     .to_string();
+
+                // Keychain fallback: if JSON refresh_token is empty, try system keychain
+                if refresh.is_empty() {
+                    if let Some(rt) = self.accounts.get_keychain_refresh_token() {
+                        crate::info!("Using refresh token from system keychain.");
+                        refresh = rt;
+                        // Restore the token back into JSON for future use
+                        account_data["refresh_token"] = serde_json::json!(&refresh);
+                    }
+                }
+
                 if !auth.try_refresh(&refresh) {
                     return Err(AppError::Generic(
                         "Token refresh failed. Run 'login' again to re-authenticate.".into()
