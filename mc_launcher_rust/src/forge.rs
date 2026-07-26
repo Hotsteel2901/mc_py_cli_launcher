@@ -1,13 +1,12 @@
-//! Forge loader installation.
+//! Forge loader installation — manual extraction-based, no Java installer needed.
 
+use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use serde::Deserialize;
 
 use crate::error::{AppError, AppResult};
 use crate::http;
-use crate::java;
 use crate::version::VersionManager;
 
 const FORGE_MAVEN: &str = "https://maven.minecraftforge.net/net/minecraftforge/forge";
@@ -125,7 +124,48 @@ impl ForgeManager {
         Ok(())
     }
 
-    /// Install Forge loader.
+    /// Extract a file from a ZIP/JAR archive into a byte vector.
+    fn extract_zip_entry(zip_path: &Path, entry_name: &str) -> AppResult<Vec<u8>> {
+        let file = std::fs::File::open(zip_path).map_err(|e| {
+            AppError::Loader(format!("Cannot open installer: {}", e))
+        })?;
+        let mut archive = zip::ZipArchive::new(file).map_err(|e| {
+            AppError::Loader(format!("Cannot read installer zip: {}", e))
+        })?;
+        let mut entry = archive.by_name(entry_name).map_err(|_| {
+            AppError::Loader(format!(
+                "Entry '{}' not found in installer",
+                entry_name
+            ))
+        })?;
+        let mut buf = Vec::with_capacity(entry.size() as usize);
+        entry.read_to_end(&mut buf).map_err(|e| {
+            AppError::Loader(format!("Failed to read '{}': {}", entry_name, e))
+        })?;
+        Ok(buf)
+    }
+
+    /// Extract a file from the installer JAR to a destination path.
+    fn extract_from_installer(
+        installer_path: &Path,
+        entry_name: &str,
+        dest: &Path,
+    ) -> AppResult<()> {
+        if dest.exists() {
+            return Ok(());
+        }
+        let data = Self::extract_zip_entry(installer_path, entry_name)?;
+        if let Some(parent) = dest.parent() {
+            std::fs::create_dir_all(parent).ok();
+        }
+        std::fs::write(dest, &data).map_err(|e| {
+            AppError::Loader(format!("Cannot write {}: {}", dest.display(), e))
+        })?;
+        Ok(())
+    }
+
+    /// Install Forge loader — manual approach: extract version.json from the
+    /// installer JAR, download all libraries via BMCLAPI mirror, no Java needed.
     pub fn install(
         &self,
         mc_version: &str,
@@ -160,6 +200,7 @@ impl ForgeManager {
             }
         };
 
+        let full_ver = format!("{}-{}", mc_version, loader_ver);
         crate::info!(
             "Installing Forge {} for Minecraft {}...",
             loader_ver,
@@ -167,10 +208,11 @@ impl ForgeManager {
         );
         self.ensure_base_game(mc_version)?;
 
+        // ── Download the Forge installer JAR ──
         let installer_url = self.installer_url(mc_version, &loader_ver);
         let installer_path = self.lib_dir.join("forge").join(format!(
-            "forge-{}-{}-installer.jar",
-            mc_version, loader_ver
+            "forge-{}-installer.jar",
+            full_ver
         ));
         if let Some(parent) = installer_path.parent() {
             std::fs::create_dir_all(parent).ok();
@@ -185,75 +227,134 @@ impl ForgeManager {
         )
         .map_err(|e| AppError::Loader(format!("Forge installer download failed: {}", e)))?;
 
-        let java_path = java::check_java(None).ok_or_else(|| {
-            AppError::Loader("Java not found. Cannot run Forge installer.".into())
-        })?;
-
-        crate::info!("Running Forge installer (this may take a while)...");
-        let status = Command::new(&java_path)
-            .arg("-jar")
-            .arg(&installer_path)
-            .arg("--installClient")
-            .arg(&self.game_dir)
-            .status()
-            .map_err(|e| {
-                AppError::Loader(format!("Failed to run Forge installer: {}", e))
+        // ── Extract version.json from the installer ──
+        let version_json_bytes =
+            Self::extract_zip_entry(&installer_path, "version.json")?;
+        let version_data: serde_json::Value =
+            serde_json::from_slice(&version_json_bytes).map_err(|e| {
+                AppError::Loader(format!(
+                    "Failed to parse version.json from installer: {}",
+                    e
+                ))
             })?;
 
-        if !status.success() {
-            return Err(AppError::Loader(format!(
-                "Forge installer failed (exit {})",
-                status.code().unwrap_or(-1)
-            )));
-        }
+        let installed_id = version_data["id"]
+            .as_str()
+            .unwrap_or(&format!("{}-forge-{}", mc_version, loader_ver))
+            .to_string();
 
-        // Find the installed version JSON
-        let installed_id = format!("{}-forge-{}", mc_version, loader_ver);
-        let mut version_json_path = self
-            .game_dir
-            .join("versions")
-            .join(&installed_id)
-            .join(format!("{}.json", installed_id));
+        // ── Download all Forge libraries ──
+        let libs = version_data["libraries"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        crate::info!(
+            "Forge: {} libraries to download",
+            libs.len()
+        );
 
-        if !version_json_path.exists() {
-            if let Ok(candidates) = std::fs::read_dir(
-                self.game_dir.join("versions"),
-            ) {
-                let mut matches: Vec<_> = candidates
-                    .flatten()
-                    .filter(|e| {
-                        e.file_name()
-                            .to_string_lossy()
-                            .starts_with(&format!("{}-forge-", mc_version))
-                    })
-                    .collect();
-                matches.sort_by_key(|e| e.file_name());
-                if let Some(last) = matches.last() {
-                    let id = last.file_name().to_string_lossy().to_string();
-                    version_json_path =
-                        last.path().join(format!("{}.json", id));
+        let mut failed: Vec<String> = Vec::new();
+
+        for lib in &libs {
+            let name = lib["name"].as_str().unwrap_or("");
+            let url = lib["downloads"]["artifact"]["url"]
+                .as_str()
+                .unwrap_or("");
+
+            if name.is_empty() {
+                continue;
+            }
+
+            let parts: Vec<&str> = name.split(':').collect();
+            if parts.len() < 3 {
+                continue;
+            }
+            let (group, artifact, version) = (parts[0], parts[1], parts[2]);
+            let classifier = parts.get(3).copied().unwrap_or("");
+
+            let group_path = group.replace('.', "/");
+            let jar_name = if classifier.is_empty() {
+                format!("{}-{}.jar", artifact, version)
+            } else {
+                format!("{}-{}-{}.jar", artifact, version, classifier)
+            };
+            let lib_dir = self
+                .lib_dir
+                .join(&group_path)
+                .join(artifact)
+                .join(version);
+            let jar_path = lib_dir.join(&jar_name);
+
+            if jar_path.exists() {
+                continue;
+            }
+
+            if !url.is_empty() {
+                // Download from the provided URL (mirrored automatically)
+                if let Err(e) = http::download_file(
+                    url,
+                    &jar_path,
+                    &format!("{}:{}", artifact, version),
+                    None,
+                    2,
+                    false,
+                ) {
+                    failed.push(format!("{}: {}", name, e));
+                }
+            } else {
+                // Empty URL — this is the Forge universal JAR embedded in the installer
+                // It lives at maven/net/minecraftforge/forge/{ver}/forge-{ver}.jar
+                let maven_entry = format!(
+                    "maven/net/minecraftforge/forge/{}/forge-{}.jar",
+                    full_ver, full_ver
+                );
+                if let Err(e) = Self::extract_from_installer(
+                    &installer_path,
+                    &maven_entry,
+                    &jar_path,
+                ) {
+                    // Fallback: try downloading from Maven
+                    let fallback_url = format!(
+                        "https://maven.minecraftforge.net/net/minecraftforge/forge/{}/forge-{}.jar",
+                        full_ver, full_ver
+                    );
+                    if let Err(e2) = http::download_file(
+                        &fallback_url,
+                        &jar_path,
+                        &format!("{}:{}", artifact, version),
+                        None,
+                        2,
+                        false,
+                    ) {
+                        failed.push(format!("{}: extract({}), download({})", name, e, e2));
+                    }
                 }
             }
         }
 
-        if !version_json_path.exists() {
-            return Err(AppError::Loader(
-                "Forge installer finished but version.json was not found.".into(),
-            ));
+        if !failed.is_empty() {
+            crate::warn_msg!(
+                "Failed to download {} Forge libraries:",
+                failed.len()
+            );
+            for f in &failed {
+                crate::warn_msg!("  {}", f);
+            }
         }
 
-        let installed_id = version_json_path
-            .parent()
-            .ok_or_else(|| {
-                AppError::Loader("Version JSON path has no parent directory".into())
-            })?
-            .file_name()
-            .ok_or_else(|| {
-                AppError::Loader("Version JSON path has no file name".into())
-            })?
-            .to_string_lossy()
-            .to_string();
+        // ── Save version.json ──
+        let version_dir = self.game_dir.join("versions").join(&installed_id);
+        std::fs::create_dir_all(&version_dir).ok();
+        let version_json_path = version_dir.join(format!("{}.json", installed_id));
+        std::fs::write(
+            &version_json_path,
+            serde_json::to_string_pretty(&version_data).unwrap_or_default(),
+        )
+        .map_err(|e| {
+            AppError::Loader(format!("Cannot write version.json: {}", e))
+        })?;
 
+        // ── Build loader profile ──
         let profile =
             self.build_profile(mc_version, &installed_id, &version_json_path)?;
 

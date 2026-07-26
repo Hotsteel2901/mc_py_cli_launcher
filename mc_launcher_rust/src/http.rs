@@ -12,6 +12,46 @@ use crate::util;
 const LAUNCHER_NAME: &str = "simple-mc-cli";
 const LAUNCHER_VER: &str = env!("CARGO_PKG_VERSION");
 
+/// BMCLAPI mirror URL transformation.
+/// Replace Mojang/Forge/Fabric/NeoForge official domains with BMCLAPI mirror.
+/// See: https://bmclapidoc.bangbang93.com/
+fn mirror_url(url: &str) -> String {
+    url.replace("https://launchermeta.mojang.com", "https://bmclapi2.bangbang93.com")
+        .replace("https://launcher.mojang.com", "https://bmclapi2.bangbang93.com")
+        .replace(
+            "https://piston-meta.mojang.com",
+            "https://bmclapi2.bangbang93.com",
+        )
+        .replace(
+            "https://resources.download.minecraft.net",
+            "https://bmclapi2.bangbang93.com/assets",
+        )
+        .replace(
+            "https://libraries.minecraft.net",
+            "https://bmclapi2.bangbang93.com/maven",
+        )
+        .replace(
+            "https://maven.minecraftforge.net",
+            "https://bmclapi2.bangbang93.com/maven",
+        )
+        .replace(
+            "https://files.minecraftforge.net",
+            "https://bmclapi2.bangbang93.com/maven",
+        )
+        .replace(
+            "https://meta.fabricmc.net",
+            "https://bmclapi2.bangbang93.com/fabric-meta",
+        )
+        .replace(
+            "https://maven.fabricmc.net",
+            "https://bmclapi2.bangbang93.com/maven",
+        )
+        .replace(
+            "https://maven.neoforged.net",
+            "https://bmclapi2.bangbang93.com/maven",
+        )
+}
+
 /// Result type: (status_code, response_body_bytes) or error string.
 pub type HttpResult = Result<(u16, Vec<u8>), String>;
 
@@ -25,6 +65,7 @@ pub fn http_request(
     timeout_secs: u64,
     max_retries: u32,
 ) -> HttpResult {
+    let mirrored = mirror_url(url);
     let mut last_err = String::new();
     let mut last_body: Vec<u8> = Vec::new();
 
@@ -34,8 +75,8 @@ pub fn http_request(
             .build();
 
         let mut req = match method {
-            "POST" => agent.post(url),
-            _ => agent.get(url),
+            "POST" => agent.post(&mirrored),
+            _ => agent.get(&mirrored),
         };
 
         req = req.set(
@@ -164,6 +205,7 @@ pub fn download_file(
         fs::remove_file(dest).ok();
     }
 
+    let mirrored = mirror_url(url);
     let mut last_err = String::new();
     for attempt in 0..max_retries {
         let agent = ureq::AgentBuilder::new()
@@ -171,7 +213,7 @@ pub fn download_file(
             .build();
 
         match agent
-            .get(url)
+            .get(&mirrored)
             .set(
                 "User-Agent",
                 &format!("{}/{}", LAUNCHER_NAME, LAUNCHER_VER),

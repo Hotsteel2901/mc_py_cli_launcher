@@ -54,6 +54,7 @@ fn parse_ram(value: &str) -> Result<u32, String> {
 
 fn main() {
     let matches = Command::new("mc-launcher")
+        .disable_version_flag(true)
         .version(env!("CARGO_PKG_VERSION"))
         .about(
             "Simple Minecraft CLI Launcher -- Microsoft + offline + \
