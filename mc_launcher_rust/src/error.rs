@@ -14,20 +14,8 @@ pub enum AppError {
     Url(#[from] url::ParseError),
     #[error("Regex error: {0}")]
     Regex(#[from] regex::Error),
-    #[error("Network error: {0}")]
-    Network(String),
-    #[error("Authentication failed: {0}")]
-    Auth(String),
-    #[error("Java not found: {0}")]
-    JavaNotFound(String),
-    #[error("Version not found: {0}")]
-    VersionNotFound(String),
     #[error("Loader error: {0}")]
     Loader(String),
-    #[error("Mod error: {0}")]
-    Mod(String),
-    #[error("Configuration error: {0}")]
-    Config(String),
     #[error("{0}")]
     Generic(String),
 }

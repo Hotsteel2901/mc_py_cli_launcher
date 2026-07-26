@@ -12,7 +12,6 @@ mod http;
 mod java;
 pub mod log;
 mod launcher;
-mod loader;
 mod mod_manager;
 mod modrinth;
 mod neoforge;
