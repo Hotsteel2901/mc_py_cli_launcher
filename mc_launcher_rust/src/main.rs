@@ -1,10 +1,11 @@
 //! MC CLI Launcher -- Rust rewrite
 //!
 //! Simple Minecraft CLI launcher: Microsoft login, offline mode,
-//! Fabric/Forge/NeoForge loaders, and Modrinth mods.
+//! Fabric/Forge/NeoForge loaders, Modrinth/CurseForge mods.
 
 mod account;
 mod auth;
+mod curseforge;
 mod error;
 mod fabric;
 mod forge;
@@ -148,6 +149,14 @@ fn main() {
                 .action(ArgAction::SetTrue),
         )
         .arg(
+            arg!(--modrinth "Force search/install mods from Modrinth only")
+                .action(ArgAction::SetTrue),
+        )
+        .arg(
+            arg!(--curseforge "Force search/install mods from CurseForge only")
+                .action(ArgAction::SetTrue),
+        )
+        .arg(
             arg!(--limit <N> "Max search results")
                 .value_parser(value_parser!(u32))
                 .default_value("10"),
@@ -188,6 +197,9 @@ fn main() {
     let height = matches.get_one::<u32>("height").copied();
     let no_assets = matches.get_flag("no-assets");
     let device_code = matches.get_flag("device-code");
+    let modrinth_flag = matches.get_flag("modrinth");
+    let curseforge_flag = matches.get_flag("curseforge");
+    let mod_source = crate::mod_manager::ModSource::from_flags(modrinth_flag, curseforge_flag);
     let official_flag = matches.get_flag("official");
     let bmcl_flag = matches.get_flag("bmcl");
     let fabric_flag = matches.get_flag("fabric");
@@ -236,7 +248,7 @@ fn main() {
         "list-loaders" => cmd_list_loaders(),
         "list-installed" => cmd_list_installed(&game_dir, &launcher),
         "list-mods" => cmd_list_mods(&game_dir, mc_version),
-        "search" => cmd_search(&game_dir, query, limit, mc_version, loader.as_deref()),
+        "search" => cmd_search(&game_dir, query, limit, mc_version, loader.as_deref(), mod_source),
         "search-more" => cmd_search_more(&game_dir, query),
         "install-fabric" => {
             cmd_install_fabric(&game_dir, mc_version, loader_version.as_deref())
@@ -248,7 +260,7 @@ fn main() {
             cmd_install_neoforge(&game_dir, mc_version, loader_version.as_deref())
         }
         "install-mod" => cmd_install_mod(
-            &game_dir, query, mc_version, loader.as_deref(), mod_version.as_deref(),
+            &game_dir, query, mc_version, loader.as_deref(), mod_version.as_deref(), mod_source,
         ),
         "disable-mod" => cmd_disable_mod(&game_dir, query, mc_version),
         "enable-mod" => cmd_enable_mod(&game_dir, query, mc_version),
@@ -500,15 +512,21 @@ fn cmd_search(
     limit: u32,
     mc_version: Option<String>,
     loader: Option<&str>,
+    mod_source: crate::mod_manager::ModSource,
 ) {
     let query = query.unwrap_or_else(|| {
         crate::die!("Please provide a search query.\n  Example: mc-launcher search sodium");
     });
 
-    crate::log::header(&format!("Searching for: {} (source: modrinth)", query));
+    let source_label = match mod_source {
+        crate::mod_manager::ModSource::Modrinth => "modrinth",
+        crate::mod_manager::ModSource::CurseForge => "curseforge",
+        crate::mod_manager::ModSource::Auto => "auto (modrinth → curseforge)",
+    };
+    crate::log::header(&format!("Searching for: {} (source: {})", query, source_label));
 
     let mm = ModManager::new(game_dir);
-    let hits = mm.search(&query, limit, mc_version.as_deref(), loader);
+    let hits = mm.search(&query, limit, mc_version.as_deref(), loader, mod_source);
 
     if hits.is_empty() {
         crate::warn_msg!("No results found.");
@@ -847,6 +865,7 @@ fn cmd_install_mod(
     mc_version: Option<String>,
     loader: Option<&str>,
     mod_version: Option<&str>,
+    mod_source: crate::mod_manager::ModSource,
 ) {
     let slug = query.unwrap_or_else(|| {
         crate::die!("Please provide a mod slug.\n  Example: mc-launcher install-mod sodium -v 1.21.4");
@@ -857,7 +876,7 @@ fn cmd_install_mod(
 
     let mm = ModManager::new(game_dir);
     let (_paths, _version_data, project) =
-        mm.install(&slug, &mc_version, loader, mod_version);
+        mm.install(&slug, &mc_version, loader, mod_version, mod_source);
 
     let title = project["title"].as_str().unwrap_or(&slug);
     let source = project["source"].as_str().unwrap_or("?");

@@ -1,8 +1,32 @@
 //! Mod management — search, install, list, disable, enable, uninstall mods.
+//! Supports both Modrinth and CurseForge sources with automatic fallback.
 
 use std::path::{Path, PathBuf};
 
+use crate::curseforge;
 use crate::modrinth;
+
+/// Mod source selection.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ModSource {
+    /// Auto: try Modrinth first, fall back to CurseForge.
+    Auto,
+    /// Force Modrinth only.
+    Modrinth,
+    /// Force CurseForge only.
+    CurseForge,
+}
+
+impl ModSource {
+    pub fn from_flags(modrinth_flag: bool, curseforge_flag: bool) -> Self {
+        match (modrinth_flag, curseforge_flag) {
+            (true, true) => crate::die!("Cannot use both --modrinth and --curseforge."),
+            (true, false) => ModSource::Modrinth,
+            (false, true) => ModSource::CurseForge,
+            (false, false) => ModSource::Auto,
+        }
+    }
+}
 
 pub struct ModManager {
     pub game_dir: PathBuf,
@@ -63,8 +87,52 @@ impl ModManager {
         vers
     }
 
-    /// Search for mods on Modrinth.
+    /// Search for mods on Modrinth and/or CurseForge.
+    /// In Auto mode, tries Modrinth first; if no results, falls back to CurseForge.
     pub fn search(
+        &self,
+        query: &str,
+        limit: u32,
+        game_version: Option<&str>,
+        loader: Option<&str>,
+        source: ModSource,
+    ) -> Vec<serde_json::Value> {
+        match source {
+            ModSource::Modrinth => self.search_modrinth(query, limit, game_version, loader),
+            ModSource::CurseForge => {
+                if !curseforge::is_available() {
+                    crate::die!("CurseForge API key not set. Set CURSEFORGE_API_KEY environment variable.");
+                }
+                match curseforge::search_projects(query, limit, game_version, loader) {
+                    Ok(hits) => hits,
+                    Err(e) => crate::die!(format!("CurseForge search failed: {}", e)),
+                }
+            }
+            ModSource::Auto => {
+                // Try Modrinth first
+                let hits = self.search_modrinth(query, limit, game_version, loader);
+                if !hits.is_empty() {
+                    return hits;
+                }
+                // Fall back to CurseForge
+                if curseforge::is_available() {
+                    crate::info!("No results on Modrinth, trying CurseForge...");
+                    match curseforge::search_projects(query, limit, game_version, loader) {
+                        Ok(cf_hits) => cf_hits,
+                        Err(e) => {
+                            crate::warn_msg!("CurseForge search failed: {}", e);
+                            Vec::new()
+                        }
+                    }
+                } else {
+                    Vec::new()
+                }
+            }
+        }
+    }
+
+    /// Search on Modrinth only.
+    fn search_modrinth(
         &self,
         query: &str,
         limit: u32,
@@ -242,13 +310,15 @@ impl ModManager {
         Some(detected[0].clone())
     }
 
-    /// Install a mod.
+    /// Install a mod from Modrinth or CurseForge.
+    /// In Auto mode, tries Modrinth first; if not found, tries CurseForge.
     pub fn install(
         &self,
         slug: &str,
         mc_version: &str,
         loader: Option<&str>,
         version_id: Option<&str>,
+        source: ModSource,
     ) -> (Vec<PathBuf>, serde_json::Value, serde_json::Value) {
         crate::info!("Resolving mod: {}...", slug);
         let loader = self.pick_loader(mc_version, loader);
@@ -256,43 +326,89 @@ impl ModManager {
             crate::info!("Using loader: {}", l);
         }
 
+        match source {
+            ModSource::Modrinth => {
+                match self.try_install_modrinth(slug, mc_version, loader.as_deref(), version_id) {
+                    Ok(result) => result,
+                    Err(_) => {
+                        crate::die!(format!(
+                            "Mod '{}' not found on Modrinth.",
+                            slug
+                        ));
+                    }
+                }
+            }
+            ModSource::CurseForge => {
+                if !curseforge::is_available() {
+                    crate::die!("CurseForge API key not set. Set CURSEFORGE_API_KEY environment variable.");
+                }
+                self.install_from_curseforge(slug, mc_version, loader.as_deref(), version_id)
+            }
+            ModSource::Auto => {
+                // Try Modrinth first
+                match self.try_install_modrinth(slug, mc_version, loader.as_deref(), version_id) {
+                    Ok(result) => result,
+                    Err(_) => {
+                        // Fall back to CurseForge
+                        if curseforge::is_available() {
+                            crate::info!("Not found on Modrinth, trying CurseForge...");
+                            self.install_from_curseforge(slug, mc_version, loader.as_deref(), version_id)
+                        } else {
+                            crate::die!(format!(
+                                "Mod '{}' not found on Modrinth, and CurseForge is not configured.",
+                                slug
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Try installing from Modrinth; returns Err if the mod/project is not found.
+    fn try_install_modrinth(
+        &self,
+        slug: &str,
+        mc_version: &str,
+        loader: Option<&str>,
+        version_id: Option<&str>,
+    ) -> Result<(Vec<PathBuf>, serde_json::Value, serde_json::Value), ()> {
         let project = modrinth::get_project(slug);
-        let project_id = project["id"].as_str().unwrap_or(slug);
+        let project_id = project["id"].as_str();
+        if project_id.is_none() {
+            return Err(());
+        }
+        let project_id = project_id.unwrap();
 
         let versions = modrinth::get_project_versions(
             project_id,
-            loader.as_ref().map(|l| vec![l.clone()]).as_deref(),
+            loader.map(|l| vec![l.to_string()]).as_deref(),
             Some(&[mc_version.to_string()]),
         );
 
-        let proj_title = project["title"].as_str().unwrap_or(slug);
-
         if versions.as_array().is_none_or(|a| a.is_empty()) {
-            let extra = format!(
-                " for MC {}{}",
-                mc_version,
-                loader
-                    .as_ref()
-                    .map(|l| format!(" ({})", l))
-                    .unwrap_or_default()
-            );
-            crate::error_msg!("No versions found for {}{}", proj_title, extra);
-
-            let support = self.loader_support(project_id);
-            if !support.is_empty() {
-                println!(
-                    "\n  Available support for '{}':",
-                    proj_title
-                );
-                println!("    {}", Self::format_loader_support(&support));
-                println!();
-            }
-            if loader.is_none() {
-                println!("  Hint: install a loader first, or specify --loader manually");
-            }
-            std::process::exit(1);
+            return Err(());
         }
 
+        Ok(self.do_install_modrinth(
+            project,
+            versions,
+            mc_version,
+            loader,
+            version_id,
+        ))
+    }
+
+    /// Install from Modrinth (assumes project/versions already fetched and valid).
+    fn do_install_modrinth(
+        &self,
+        project: serde_json::Value,
+        versions: serde_json::Value,
+        mc_version: &str,
+        loader: Option<&str>,
+        version_id: Option<&str>,
+    ) -> (Vec<PathBuf>, serde_json::Value, serde_json::Value) {
+        let proj_title = project["title"].as_str().unwrap_or("");
         let mut versions_arr = versions.as_array().unwrap().clone();
 
         let target = if let Some(vid) = version_id {
@@ -307,29 +423,16 @@ impl ModManager {
                     ));
                 })
         } else {
-            // Sort: loader match first, then by date
             versions_arr.sort_by(|a, b| {
-                let a_match = loader.as_ref().is_none_or(|l| {
-                    a["loaders"]
-                        .as_array()
-                        .is_some_and(|arr| {
-                            arr.iter().any(|v| {
-                                v.as_str().is_some_and(|s| {
-                                    s.to_lowercase() == l.to_lowercase()
-                                })
-                            })
-                        })
+                let a_match = loader.is_none_or(|l| {
+                    a["loaders"].as_array().is_some_and(|arr| {
+                        arr.iter().any(|v| v.as_str().is_some_and(|s| s.eq_ignore_ascii_case(l)))
+                    })
                 });
-                let b_match = loader.as_ref().is_none_or(|l| {
-                    b["loaders"]
-                        .as_array()
-                        .is_some_and(|arr| {
-                            arr.iter().any(|v| {
-                                v.as_str().is_some_and(|s| {
-                                    s.to_lowercase() == l.to_lowercase()
-                                })
-                            })
-                        })
+                let b_match = loader.is_none_or(|l| {
+                    b["loaders"].as_array().is_some_and(|arr| {
+                        arr.iter().any(|v| v.as_str().is_some_and(|s| s.eq_ignore_ascii_case(l)))
+                    })
                 });
                 if a_match != b_match {
                     if a_match {
@@ -347,6 +450,80 @@ impl ModManager {
             versions_arr[0].clone()
         };
 
+        self.finish_install(
+            &project,
+            proj_title,
+            &target,
+            mc_version,
+            loader,
+            "modrinth",
+        )
+    }
+
+    /// Install from CurseForge.
+    fn install_from_curseforge(
+        &self,
+        mod_id: &str,
+        mc_version: &str,
+        loader: Option<&str>,
+        version_id: Option<&str>,
+    ) -> (Vec<PathBuf>, serde_json::Value, serde_json::Value) {
+        let project = curseforge::get_project(mod_id).unwrap_or_else(|e| {
+            crate::die!(format!("CurseForge: {}", e));
+        });
+        let proj_id = project["id"].as_str().unwrap_or(mod_id);
+        let proj_title = project["title"].as_str().unwrap_or(mod_id);
+
+        let files = curseforge::get_project_files(proj_id, Some(mc_version), loader)
+            .unwrap_or_else(|e| {
+                crate::die!(format!("CurseForge: {}", e));
+            });
+
+        if files.is_empty() {
+            let extra = format!(
+                " for MC {}{}",
+                mc_version,
+                loader.map(|l| format!(" ({})", l)).unwrap_or_default()
+            );
+            crate::error_msg!("No versions found for {}{}", proj_title, extra);
+            std::process::exit(1);
+        }
+
+        let target = if let Some(vid) = version_id {
+            files
+                .iter()
+                .find(|v| v["id"].as_str() == Some(vid))
+                .cloned()
+                .unwrap_or_else(|| {
+                    crate::die!(format!(
+                        "Version '{}' not found for {}",
+                        vid, proj_title
+                    ));
+                })
+        } else {
+            files[0].clone()
+        };
+
+        self.finish_install(
+            &project,
+            proj_title,
+            &target,
+            mc_version,
+            loader,
+            "curseforge",
+        )
+    }
+
+    /// Shared install logic after the target version is selected.
+    fn finish_install(
+        &self,
+        project: &serde_json::Value,
+        proj_title: &str,
+        target: &serde_json::Value,
+        mc_version: &str,
+        loader: Option<&str>,
+        source: &str,
+    ) -> (Vec<PathBuf>, serde_json::Value, serde_json::Value) {
         let ver_num = target["version_number"]
             .as_str()
             .unwrap_or(target["id"].as_str().unwrap_or("?"));
@@ -369,12 +546,9 @@ impl ModManager {
             })
             .unwrap_or_else(|| "?".to_string());
 
-        if let Some(ref l) = loader {
+        if let Some(l) = loader {
             let has_loader = target["loaders"].as_array().is_some_and(|arr| {
-                arr.iter().any(|v| {
-                    v.as_str()
-                        .is_some_and(|s| s.to_lowercase() == l.to_lowercase())
-                })
+                arr.iter().any(|v| v.as_str().is_some_and(|s| s.eq_ignore_ascii_case(l)))
             });
             if !has_loader {
                 crate::warn_msg!(
@@ -389,9 +563,12 @@ impl ModManager {
         println!("    Mod version:   {}", ver_num);
         println!("    Game versions: {}", mc_str);
         println!("    Loaders:       {}", loaders_str);
+        println!("    Source:        {}", source);
 
-        // Check dependencies
-        self.check_dependencies(&target, mc_version, loader.as_deref());
+        // Check dependencies (Modrinth only — CurseForge deps use integer IDs)
+        if source == "modrinth" {
+            self.check_dependencies(target, mc_version, loader);
+        }
 
         let dest_dir = self.mods_dir(mc_version);
         let l = if loader.is_some() {
@@ -399,7 +576,11 @@ impl ModManager {
         } else {
             proj_title.to_string()
         };
-        let paths = modrinth::download_version_files(&target, &dest_dir, &l);
+        let paths = if source == "modrinth" {
+            modrinth::download_version_files(target, &dest_dir, &l)
+        } else {
+            curseforge::download_version_files(target, &dest_dir, &l)
+        };
         let total_size: u64 = paths
             .iter()
             .filter_map(|p| p.metadata().ok().map(|m| m.len()))
@@ -411,7 +592,7 @@ impl ModManager {
             dest_dir.display()
         );
 
-        (paths, target, project)
+        (paths, target.clone(), project.clone())
     }
 
     /// Check and display mod dependencies.
@@ -593,7 +774,7 @@ impl ModManager {
                 if answer == "y" || answer == "yes" {
                     for (title, slug, _ver, _mc) in &required_missing {
                         crate::info!("Installing dependency: {} ({})", title, slug);
-                        self.install(slug, mc_version, loader, None);
+                        self.install(slug, mc_version, loader, None, ModSource::Modrinth);
                         crate::success!("Installed: {}", title);
                     }
                 }
