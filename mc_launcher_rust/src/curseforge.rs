@@ -1,6 +1,11 @@
 //! CurseForge API client — search, project info, files, download.
-//! Requires API key via CURSEFORGE_API_KEY environment variable.
 //! Ported from HMCL's CurseForgeRemoteAddonRepository.java.
+//!
+//! API key resolution (same strategy as HMCL):
+//! 1. Runtime env var CURSEFORGE_API_KEY (highest priority, user override)
+//! 2. Compile-time baked-in key (build env CURSEFORGE_API_KEY, embedded in binary)
+//!
+//! This way users don't need to configure anything — like HMCL.
 
 use std::path::{Path, PathBuf};
 
@@ -8,10 +13,27 @@ use crate::http;
 
 const CF_API: &str = "https://api.curseforge.com/v1";
 
-/// Get the CurseForge API key from environment variable.
-/// HMCL reads from JAR Manifest; we read from env var instead.
+/// Compile-time baked-in API key (from build environment).
+/// If CURSEFORGE_API_KEY was set during `cargo build`, it's embedded here.
+const BUILTIN_API_KEY: &str = match option_env!("CURSEFORGE_API_KEY") {
+    Some(k) => k,
+    None => "",
+};
+
+/// Get the CurseForge API key.
+/// Priority: runtime env var > compile-time baked-in key.
 fn api_key() -> Option<String> {
-    std::env::var("CURSEFORGE_API_KEY").ok().filter(|s| !s.is_empty())
+    // 1. Runtime env var (user override)
+    if let Ok(k) = std::env::var("CURSEFORGE_API_KEY") {
+        if !k.is_empty() {
+            return Some(k);
+        }
+    }
+    // 2. Compile-time baked-in key
+    if !BUILTIN_API_KEY.is_empty() {
+        return Some(BUILTIN_API_KEY.to_string());
+    }
+    None
 }
 
 /// Check if CurseForge is available (has API key).

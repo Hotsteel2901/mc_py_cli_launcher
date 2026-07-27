@@ -101,7 +101,7 @@ impl ModManager {
             ModSource::Modrinth => self.search_modrinth(query, limit, game_version, loader),
             ModSource::CurseForge => {
                 if !curseforge::is_available() {
-                    crate::die!("CurseForge API key not set. Set CURSEFORGE_API_KEY environment variable.");
+                    crate::die!("CurseForge API key not available. Set CURSEFORGE_API_KEY env var or rebuild with it.");
                 }
                 match curseforge::search_projects(query, limit, game_version, loader) {
                     Ok(hits) => hits,
@@ -340,7 +340,7 @@ impl ModManager {
             }
             ModSource::CurseForge => {
                 if !curseforge::is_available() {
-                    crate::die!("CurseForge API key not set. Set CURSEFORGE_API_KEY environment variable.");
+                    crate::die!("CurseForge API key not available. Set CURSEFORGE_API_KEY env var or rebuild with it.");
                 }
                 self.install_from_curseforge(slug, mc_version, loader.as_deref(), version_id)
             }
