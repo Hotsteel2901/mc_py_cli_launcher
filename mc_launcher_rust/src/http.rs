@@ -70,44 +70,41 @@ pub fn resolve_source_mode(manual: Option<SourceMode>) -> SourceMode {
     detected
 }
 
-/// BMCLAPI mirror URL transformation.
-/// Replace Mojang/Forge/Fabric/NeoForge official domains with BMCLAPI mirror.
+/// BMCLAPI mirror URL transformation (prefix matching, like HMCL).
 /// See: https://bmclapidoc.bangbang93.com/
+/// HMCL source: BMCLAPIDownloadProvider.java
 fn mirror_url(url: &str) -> String {
-    url.replace("https://launchermeta.mojang.com", "https://bmclapi2.bangbang93.com")
-        .replace("https://launcher.mojang.com", "https://bmclapi2.bangbang93.com")
-        .replace(
-            "https://piston-meta.mojang.com",
-            "https://bmclapi2.bangbang93.com",
-        )
-        .replace(
-            "https://resources.download.minecraft.net",
-            "https://bmclapi2.bangbang93.com/assets",
-        )
-        .replace(
-            "https://libraries.minecraft.net",
-            "https://bmclapi2.bangbang93.com/maven",
-        )
-        .replace(
-            "https://maven.minecraftforge.net",
-            "https://bmclapi2.bangbang93.com/maven",
-        )
-        .replace(
-            "https://files.minecraftforge.net",
-            "https://bmclapi2.bangbang93.com/maven",
-        )
-        .replace(
-            "https://meta.fabricmc.net",
-            "https://bmclapi2.bangbang93.com/fabric-meta",
-        )
-        .replace(
-            "https://maven.fabricmc.net",
-            "https://bmclapi2.bangbang93.com/maven",
-        )
-        .replace(
-            "https://maven.neoforged.net",
-            "https://bmclapi2.bangbang93.com/maven",
-        )
+    const BMCL_API: &str = "https://bmclapi2.bangbang93.com";
+    const BMCL_LIBS: &str = "https://bmclapi2.bangbang93.com/libraries";
+    const BMCL_MAVEN: &str = "https://bmclapi2.bangbang93.com/maven";
+    const BMCL_MAVEN_SLASH: &str = "https://bmclapi2.bangbang93.com/maven/";
+    const BMCL_FABRIC_META: &str = "https://bmclapi2.bangbang93.com/fabric-meta";
+    const BMCL_ASSETS: &str = "https://bmclapi2.bangbang93.com/assets";
+    const TENCENT_MAVEN: &str = "https://mirrors.cloud.tencent.com/nexus/repository/maven-public";
+    // HMCL's replacement table — prefix match, first match wins.
+    const REPLACEMENTS: &[(&str, &str)] = &[
+        ("https://bmclapi2.bangbang93.com", BMCL_API),
+        ("https://launchermeta.mojang.com", BMCL_API),
+        ("https://piston-meta.mojang.com", BMCL_API),
+        ("https://piston-data.mojang.com", BMCL_API),
+        ("https://launcher.mojang.com", BMCL_API),
+        ("https://libraries.minecraft.net", BMCL_LIBS),
+        ("http://files.minecraftforge.net/maven", BMCL_MAVEN),
+        ("https://files.minecraftforge.net/maven", BMCL_MAVEN),
+        ("https://maven.minecraftforge.net", BMCL_MAVEN),
+        ("https://maven.neoforged.net/releases/", BMCL_MAVEN_SLASH),
+        ("https://meta.fabricmc.net", BMCL_FABRIC_META),
+        ("https://maven.fabricmc.net", BMCL_MAVEN),
+        ("https://repo1.maven.org/maven2", TENCENT_MAVEN),
+        ("https://repo.maven.apache.org/maven2", TENCENT_MAVEN),
+        ("https://resources.download.minecraft.net", BMCL_ASSETS),
+    ];
+    for (prefix, replacement) in REPLACEMENTS {
+        if let Some(stripped) = url.strip_prefix(prefix) {
+            return format!("{}{}", replacement, stripped);
+        }
+    }
+    url.to_string()
 }
 
 /// Result type: (status_code, response_body_bytes) or error string.

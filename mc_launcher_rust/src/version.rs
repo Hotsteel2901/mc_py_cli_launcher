@@ -136,6 +136,7 @@ impl VersionManager {
     }
 
     /// Download the client JAR for a version.
+    /// Follows HMCL's Version.getDownloadInfo() — falls back to BMCLAPI versions URL.
     pub fn download_client_jar(
         &self,
         version_id: &str,
@@ -148,18 +149,32 @@ impl VersionManager {
         if jar_path.exists() {
             return Ok(jar_path);
         }
-        let url = version_data["downloads"]["client"]["url"]
-            .as_str()
-            .unwrap_or("");
-        let sha1 = version_data["downloads"]["client"]["sha1"]
-            .as_str()
-            .unwrap_or("");
+        // HMCL: if downloads.client is null, use DEFAULT_VERSION_DOWNLOAD_URL
+        let (url, sha1) = if version_data["downloads"]["client"].is_null() {
+            (
+                format!(
+                    "https://bmclapi2.bangbang93.com/versions/{}/{}.jar",
+                    version_id, version_id
+                ),
+                None,
+            )
+        } else {
+            (
+                version_data["downloads"]["client"]["url"]
+                    .as_str()
+                    .unwrap_or("")
+                    .to_string(),
+                version_data["downloads"]["client"]["sha1"]
+                    .as_str()
+                    .map(|s| s.to_string()),
+            )
+        };
         crate::info!("Downloading client jar for {}...", version_id);
         if let Err(e) = http::download_file(
-            url,
+            &url,
             &jar_path,
             &format!("{}.jar", version_id),
-            Some(sha1),
+            sha1.as_deref(),
             3,
             true,
         ) {
@@ -248,6 +263,7 @@ impl VersionManager {
 
     /// Download all libraries and extract native libraries.
     /// Returns paths to all JAR files for the classpath.
+    /// Follows HMCL's Library.java logic: native libs download classifier JARs, not main artifact.
     pub fn download_libraries(
         &self,
         version_data: &serde_json::Value,
@@ -261,7 +277,7 @@ impl VersionManager {
         let libs = libs.unwrap();
         let osn = util::os_name();
 
-        let mut all_downloads: Vec<(String, PathBuf, String, bool)> = Vec::new(); // (url, dest, label, optional)
+        let mut all_downloads: Vec<(String, PathBuf, String, Option<String>)> = Vec::new(); // (url, dest, label, sha1)
         let mut all_jars: Vec<PathBuf> = Vec::new();
 
         for lib in libs {
@@ -275,20 +291,8 @@ impl VersionManager {
                 continue;
             }
             let (group, artifact, version) = (parts[0], parts[1], parts[2]);
-            let classifier = parts.get(3).copied();
 
             let group_path = group.replace('.', "/");
-            let lib_dir = self
-                .libraries_dir
-                .join(&group_path)
-                .join(artifact)
-                .join(version);
-
-            let jar_name = if let Some(cls) = classifier {
-                format!("{}-{}-{}.jar", artifact, version, cls)
-            } else {
-                format!("{}-{}.jar", artifact, version)
-            };
 
             // Check rules
             if let Some(rules) = lib.get("rules") {
@@ -297,76 +301,119 @@ impl VersionManager {
                 }
             }
 
-            let is_native_by_name =
-                classifier.is_some_and(|c| c.contains("natives-"));
-            let label_suffix = if is_native_by_name { " [native]" } else { "" };
             let has_natives = lib.get("natives").is_some();
+            let downloads = lib.get("downloads");
 
-            // Main artifact
-            if let Some(artifact_info) = lib["downloads"].get("artifact") {
-                let jar_path = lib_dir.join(&jar_name);
-                if !jar_path.exists() {
-                    let url = artifact_info["url"].as_str().unwrap_or("");
-                    all_downloads.push((
-                        url.to_string(),
-                        jar_path.clone(),
-                        format!("{}:{}:{}", group, artifact, label_suffix),
-                        has_natives, // POM-only native libs may have no main artifact
-                    ));
-                }
-                all_jars.push(jar_path);
-            } else {
-                let jar_path = lib_dir.join(&jar_name);
-                if !jar_path.exists() {
-                    let url = format!(
-                        "https://libraries.minecraft.net/{}/{}/{}/{}",
-                        group_path, artifact, version, jar_name
-                    );
-                    all_downloads.push((
-                        url,
-                        jar_path.clone(),
-                        format!("{}:{}:{}", group, artifact, label_suffix),
-                        has_natives,
-                    ));
-                }
-                all_jars.push(jar_path);
-            }
+            // ── Determine what to download (following HMCL Library.java) ──
+            // For native libs (has 'natives' field): download classifier JAR only, skip main artifact.
+            // For regular libs: download downloads.artifact, or construct Maven URL.
+            if has_natives {
+                // Native library — resolve classifier for current OS
+                let native_classifier = if let Some(natives) = lib.get("natives") {
+                    natives[osn].as_str().map(|s| s.replace("${arch}", util::os_arch()))
+                } else {
+                    None
+                };
 
-            // Native classifiers
-            if let Some(natives) = lib.get("natives") {
-                if let Some(native_key) = natives[osn].as_str() {
-                    let _native_key = native_key.replace("${arch}", util::os_arch());
-                    if let Some(classifiers) =
-                        lib["downloads"].get("classifiers")
+                if let Some(nc) = native_classifier {
+                    let lib_dir = self
+                        .libraries_dir
+                        .join(&group_path)
+                        .join(artifact)
+                        .join(version);
+
+                    // Try downloads.classifiers[native_classifier] first
+                    let (url, sha1) = if let Some(classifiers) =
+                        downloads.and_then(|d| d.get("classifiers"))
                     {
-                        let classifier_keys: Vec<String> = classifiers
-                            .as_object()
-                            .map(|obj| obj.keys().cloned().collect())
-                            .unwrap_or_default();
-                        let match_key =
-                            self.needs_natives(name, &classifier_keys);
-                        if let Some(mk) = match_key {
-                            if let Some(nc) = classifiers.get(&mk) {
-                                let native_jar = lib_dir.join(format!(
-                                    "{}-{}-{}.jar",
-                                    artifact, version, mk
-                                ));
-                                if !native_jar.exists() {
-                                    let url = nc["url"].as_str().unwrap_or("");
-                                    all_downloads.push((
-                                        url.to_string(),
-                                        native_jar.clone(),
-                                        format!(
-                                            "{}:{} [native]",
-                                            group, artifact
-                                        ),
-                                        false, // native classifiers are not optional
-                                    ));
+                        if let Some(info) = classifiers.get(&nc) {
+                            (
+                                info["url"].as_str().unwrap_or("").to_string(),
+                                info["sha1"].as_str().map(|s| s.to_string()),
+                            )
+                        } else {
+                            // Try finding a matching classifier key
+                            let classifier_keys: Vec<String> = classifiers
+                                .as_object()
+                                .map(|obj| obj.keys().cloned().collect())
+                                .unwrap_or_default();
+                            let match_key = self.needs_natives(name, &classifier_keys);
+                            if let Some(mk) = match_key {
+                                if let Some(info) = classifiers.get(&mk) {
+                                    (
+                                        info["url"].as_str().unwrap_or("").to_string(),
+                                        info["sha1"].as_str().map(|s| s.to_string()),
+                                    )
+                                } else {
+                                    (String::new(), None)
                                 }
+                            } else {
+                                (String::new(), None)
                             }
                         }
+                    } else {
+                        (String::new(), None)
+                    };
+
+                    let jar_name = format!("{}-{}-{}.jar", artifact, version, nc);
+                    let jar_path = lib_dir.join(&jar_name);
+
+                    if !jar_path.exists() && !url.is_empty() {
+                        all_downloads.push((
+                            url,
+                            jar_path.clone(),
+                            format!("{}:{} [native]", group, artifact),
+                            sha1,
+                        ));
+                    }
+                    all_jars.push(jar_path);
+                }
+            } else {
+                // Regular (non-native) library
+                let lib_dir = self
+                    .libraries_dir
+                    .join(&group_path)
+                    .join(artifact)
+                    .join(version);
+                let jar_name = format!("{}-{}.jar", artifact, version);
+                let jar_path = lib_dir.join(&jar_name);
+
+                if !jar_path.exists() {
+                    // Try downloads.artifact first (HMCL: getRawDownloadInfo → downloads.artifact)
+                    let (url, sha1) = if let Some(artifact_info) =
+                        downloads.and_then(|d| d.get("artifact"))
+                    {
+                        let url = artifact_info["url"].as_str().unwrap_or("");
+                        let sha1 = artifact_info["sha1"].as_str().map(|s| s.to_string());
+                        (url.to_string(), sha1)
+                    } else {
+                        // Fallback: construct URL from library.url or default libraries.minecraft.net
+                        // (HMCL: computePath → repo + path)
+                        let repo = lib["url"]
+                            .as_str()
+                            .unwrap_or("https://libraries.minecraft.net/");
+                        let repo = if repo.ends_with('/') {
+                            repo.to_string()
+                        } else {
+                            format!("{}/", repo)
+                        };
+                        let path = format!(
+                            "{}/{}/{}/{}",
+                            group_path, artifact, version, jar_name
+                        );
+                        (format!("{}{}", repo, path), None)
+                    };
+
+                    if !url.is_empty() {
+                        all_downloads.push((
+                            url,
+                            jar_path.clone(),
+                            format!("{}:{}", group, artifact),
+                            sha1,
+                        ));
                     }
                 }
+                all_jars.push(jar_path);
             }
         }
 
@@ -390,19 +437,26 @@ impl VersionManager {
 
             let failed: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
 
-            all_downloads.par_iter().for_each(|(url, dest, label, optional)| {
-                if dest.exists() {
-                    pb.inc(1);
-                    return;
-                }
-                if let Err(e) = http::download_file(url, dest, label, None, 2, false) {
-                    if !optional {
+            all_downloads
+                .par_iter()
+                .for_each(|(url, dest, label, sha1)| {
+                    if dest.exists() {
+                        pb.inc(1);
+                        return;
+                    }
+                    if let Err(e) = http::download_file(
+                        url,
+                        dest,
+                        label,
+                        sha1.as_deref(),
+                        2,
+                        false,
+                    ) {
                         let mut failed = failed.lock().unwrap();
                         failed.push(format!("{}: {}", label, e));
                     }
-                }
-                pb.inc(1);
-            });
+                    pb.inc(1);
+                });
 
             pb.finish_with_message("Libraries done");
 
@@ -417,10 +471,8 @@ impl VersionManager {
         }
 
         // Extract natives from downloaded jars
-        for (_url, dest, label, _optional) in &all_downloads {
-            if (label.contains("[native]") || label.contains("natives-"))
-                && dest.exists()
-            {
+        for (_url, dest, label, _sha1) in &all_downloads {
+            if label.contains("[native]") && dest.exists() {
                 self.extract_natives(dest, natives_dir);
             }
         }
@@ -441,9 +493,6 @@ impl VersionManager {
                 continue;
             }
             let (group, artifact, version) = (parts[0], parts[1], parts[2]);
-            let classifier = parts.get(3).copied();
-            let is_native_new =
-                classifier.is_some_and(|c| c.contains("natives-"));
             let group_path = group.replace('.', "/");
             let lib_dir = self
                 .libraries_dir
@@ -451,22 +500,9 @@ impl VersionManager {
                 .join(artifact)
                 .join(version);
 
-            if is_native_new {
-                if let Some(cls) = classifier {
-                    let jar_name =
-                        format!("{}-{}-{}.jar", artifact, version, cls);
-                    let cached = lib_dir.join(&jar_name);
-                    if !seen.contains(&cached) && cached.exists() {
-                        self.extract_natives(&cached, natives_dir);
-                        seen.insert(cached);
-                    }
-                }
-            }
-
             if let Some(natives) = lib.get("natives") {
                 if let Some(native_key) = natives[util::os_name()].as_str() {
-                    let _native_key =
-                        native_key.replace("${arch}", util::os_arch());
+                    let native_key = native_key.replace("${arch}", util::os_arch());
                     if let Some(classifiers) =
                         lib["downloads"].get("classifiers")
                     {
@@ -476,17 +512,15 @@ impl VersionManager {
                             .unwrap_or_default();
                         let match_key =
                             self.needs_natives(name, &classifier_keys);
-                        if let Some(mk) = match_key {
-                            if classifiers.get(&mk).is_some() {
-                                let cached = lib_dir.join(format!(
-                                    "{}-{}-{}.jar",
-                                    artifact, version, mk
-                                ));
-                                if !seen.contains(&cached) && cached.exists()
-                                {
-                                    self.extract_natives(&cached, natives_dir);
-                                    seen.insert(cached);
-                                }
+                        let mk = match_key.unwrap_or(native_key);
+                        if classifiers.get(&mk).is_some() {
+                            let cached = lib_dir.join(format!(
+                                "{}-{}-{}.jar",
+                                artifact, version, mk
+                            ));
+                            if !seen.contains(&cached) && cached.exists() {
+                                self.extract_natives(&cached, natives_dir);
+                                seen.insert(cached);
                             }
                         }
                     }
@@ -576,29 +610,55 @@ impl VersionManager {
     }
 
     /// Download game assets.
+    /// Follows HMCL's Version.getAssetIndex() logic with hardcoded hashes for old versions.
     pub fn download_assets(
         &self,
         version_data: &serde_json::Value,
         max_workers: usize,
     ) -> AppResult<String> {
         let asset_index = &version_data["assetIndex"];
-        if asset_index.is_null() {
-            return Ok(version_data["assets"]
+
+        // If no assetIndex field, construct one from hardcoded hashes (HMCL: Version.getAssetIndex)
+        let (index_id, index_url) = if asset_index.is_null() {
+            let assets_id = version_data["assets"]
                 .as_str()
                 .unwrap_or("legacy")
-                .to_string());
-        }
+                .to_string();
+            let hash = match assets_id.as_str() {
+                "1.8" => "f6ad102bcaa53b1a58358f16e376d548d44933ec",
+                "14w31a" => "10a2a0e75b03cfb5a7196abbdf43b54f7fa61deb",
+                "14w25a" => "32ff354a3be1c4dd83027111e6d79ee4d701d2c0",
+                "1.7.4" => "545510a60f526b9aa8a38f9c0bc7a74235d21675",
+                "1.7.10" => "1863782e33ce7b584fc45b037325a1964e095d3e",
+                "1.7.3" => "f6cf726f4747128d13887010c2cbc44ba83504d9",
+                "pre-1.6" => "3d8e55480977e32acd9844e545177e69a52f594b",
+                _ => "770572e819335b6c0a053f8378ad88eda189fc14",
+            };
+            let assets_id = if matches!(assets_id.as_str(), "1.8" | "14w31a" | "14w25a" | "1.7.4" | "1.7.10" | "1.7.3" | "pre-1.6") {
+                assets_id
+            } else {
+                "legacy".to_string()
+            };
+            let url = format!(
+                "https://launchermeta.mojang.com/v1/packages/{}/{}.json",
+                hash, assets_id
+            );
+            (assets_id, url)
+        } else {
+            (
+                asset_index["id"].as_str().unwrap_or("").to_string(),
+                asset_index["url"].as_str().unwrap_or("").to_string(),
+            )
+        };
 
-        let index_id = asset_index["id"].as_str().unwrap_or("");
         let index_path = self
             .assets_dir
             .join("indexes")
             .join(format!("{}.json", index_id));
 
         if !index_path.exists() {
-            let url = asset_index["url"].as_str().unwrap_or("");
             if let Err(e) = http::download_file(
-                url,
+                &index_url,
                 &index_path,
                 &format!("Asset index {}", index_id),
                 None,
@@ -614,7 +674,7 @@ impl VersionManager {
                 .unwrap();
         let objects = index_data["objects"].as_object();
         if objects.is_none() {
-            return Ok(index_id.to_string());
+            return Ok(index_id);
         }
         let objects = objects.unwrap();
         let total = objects.len();
@@ -622,6 +682,9 @@ impl VersionManager {
         let mut missing: Vec<(String, PathBuf)> = Vec::new();
         for (_name, obj) in objects {
             let h = obj["hash"].as_str().unwrap_or("");
+            if h.len() < 2 {
+                continue;
+            }
             let sub_dir = &h[..2];
             let obj_path = self.assets_dir.join("objects").join(sub_dir).join(h);
             if !obj_path.exists() {
@@ -635,7 +698,7 @@ impl VersionManager {
 
         if missing.is_empty() {
             crate::info!("Assets: all {} up to date.", total);
-            return Ok(index_id.to_string());
+            return Ok(index_id);
         }
 
         crate::info!(
@@ -675,7 +738,7 @@ impl VersionManager {
             )));
         }
 
-        Ok(index_id.to_string())
+        Ok(index_id)
     }
 }
 
