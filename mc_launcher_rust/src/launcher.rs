@@ -631,6 +631,11 @@ impl MinecraftLauncher {
 
         // Loader game args
         if let Some(ref profile) = loader_profile {
+            // Legacy format (e.g. Forge 1.12.2): minecraftArguments is a
+            // complete arg string that replaces the base version's args.
+            if let Some(mca) = profile["minecraftArguments"].as_str() {
+                game_args = mca.split(' ').map(String::from).collect();
+            }
             if let Some(args) = profile["arguments"]["game"].as_array() {
                 for arg in args {
                     match arg {

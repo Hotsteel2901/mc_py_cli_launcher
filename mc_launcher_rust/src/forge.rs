@@ -428,6 +428,7 @@ impl ForgeManager {
             "mainClass": merged["mainClass"],
             "libraries": merged["libraries"],
             "arguments": merged["arguments"],
+            "minecraftArguments": merged["minecraftArguments"],
         }))
     }
 
