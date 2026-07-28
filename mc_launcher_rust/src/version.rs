@@ -184,7 +184,7 @@ impl VersionManager {
     }
 
     /// Determine if a native library classifier matches current OS/arch.
-    fn needs_natives(&self, _lib_name: &str, classifiers: &[String]) -> Option<String> {
+    pub fn needs_natives(&self, _lib_name: &str, classifiers: &[String]) -> Option<String> {
         let osn = util::os_name();
         let arch = util::os_arch();
 

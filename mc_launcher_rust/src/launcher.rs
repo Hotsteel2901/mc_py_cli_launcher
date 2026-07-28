@@ -364,6 +364,7 @@ impl MinecraftLauncher {
         // Loader libraries
         if let Some(ref profile) = loader_profile {
             if let Some(libs) = profile["libraries"].as_array() {
+                let osn = util::os_name();
                 for lib in libs {
                     if let Some(rules) = lib.get("rules") {
                         if !VersionManager::rules_allow(rules, true) {
@@ -371,53 +372,145 @@ impl MinecraftLauncher {
                         }
                     }
                     let name = lib["name"].as_str().unwrap_or("");
-                    let rel_path = lib["downloads"]["artifact"]["path"]
-                        .as_str()
-                        .map(String::from)
-                        .unwrap_or_else(|| crate::util::maven_rel_path(name));
+                    if name.is_empty() {
+                        continue;
+                    }
+                    let parts: Vec<&str> = name.split(':').collect();
+                    if parts.len() < 3 {
+                        continue;
+                    }
+                    let (group, artifact, version) = (parts[0], parts[1], parts[2]);
+                    let group_path = group.replace('.', "/");
 
-                    let lib_jar = self.game_dir.join("libraries").join(&rel_path);
-                    if !lib_jar.exists() {
-                        let url_str = lib["downloads"]["artifact"]["url"]
+                    // Check if this is a native library (following HMCL Library.java)
+                    let has_natives = lib.get("natives").is_some();
+                    let downloads = lib.get("downloads");
+
+                    if has_natives {
+                        // Native library — resolve classifier for current OS
+                        let native_classifier = lib["natives"][osn]
+                            .as_str()
+                            .map(|s| s.replace("${arch}", util::os_arch()));
+
+                        if let Some(nc) = native_classifier {
+                            let lib_dir = self
+                                .game_dir
+                                .join("libraries")
+                                .join(&group_path)
+                                .join(artifact)
+                                .join(version);
+
+                            // Try downloads.classifiers[native_classifier] first
+                            let (url, classifier_key) = if let Some(classifiers) =
+                                downloads.and_then(|d| d.get("classifiers"))
+                            {
+                                // Find matching classifier key
+                                let mk = if classifiers.get(&nc).is_some() {
+                                    nc.clone()
+                                } else {
+                                    let keys: Vec<String> = classifiers
+                                        .as_object()
+                                        .map(|obj| obj.keys().cloned().collect())
+                                        .unwrap_or_default();
+                                    self.versions
+                                        .needs_natives(name, &keys)
+                                        .unwrap_or(nc.clone())
+                                };
+                                let url = classifiers[&mk]["url"].as_str().unwrap_or("").to_string();
+                                (url, mk)
+                            } else {
+                                (String::new(), nc.clone())
+                            };
+
+                            let jar_name =
+                                format!("{}-{}-{}.jar", artifact, version, classifier_key);
+                            let jar_path = lib_dir.join(&jar_name);
+
+                            if !jar_path.exists() && !url.is_empty() {
+                                if let Err(e) = http::download_file(
+                                    &url,
+                                    &jar_path,
+                                    &format!("{}:{} [native]", group, artifact),
+                                    None,
+                                    2,
+                                    false,
+                                ) {
+                                    crate::warn_msg!(
+                                        "Could not download native lib {}: {}",
+                                        jar_path.display(),
+                                        e
+                                    );
+                                }
+                            }
+
+                            // Extract natives (HMCL: decompressNatives)
+                            if jar_path.exists() {
+                                self.versions.extract_natives(&jar_path, &natives_dir);
+                            } else {
+                                crate::warn_msg!(
+                                    "Native library missing: {}",
+                                    jar_path.display()
+                                );
+                            }
+                            // Natives do NOT go into classpath (HMCL: !library.isNative())
+                        }
+                    } else {
+                        // Regular (non-native) library
+                        let rel_path = lib["downloads"]["artifact"]["path"]
                             .as_str()
                             .map(String::from)
-                            .or_else(|| {
-                                lib["url"].as_str().map(|u| {
-                                    format!(
-                                        "{}/{}",
-                                        u.trim_end_matches('/'),
-                                        rel_path
-                                    )
-                                })
-                            });
+                            .unwrap_or_else(|| crate::util::maven_rel_path(name));
 
-                        if let Some(ref url) = url_str {
-                            if let Err(e) = http::download_file(
-                                url,
-                                &lib_jar,
-                                &lib_jar
-                                    .file_name()
-                                    .unwrap_or_default()
-                                    .to_string_lossy(),
-                                None,
-                                2,
-                                false,
-                            ) {
+                        let lib_jar = self.game_dir.join("libraries").join(&rel_path);
+                        if !lib_jar.exists() {
+                            let url_str = lib["downloads"]["artifact"]["url"]
+                                .as_str()
+                                .map(String::from)
+                                .filter(|s| !s.is_empty())
+                                .or_else(|| {
+                                    lib["url"].as_str().filter(|s| !s.is_empty()).map(|u| {
+                                        format!(
+                                            "{}/{}",
+                                            u.trim_end_matches('/'),
+                                            rel_path
+                                        )
+                                    })
+                                });
+
+                            if let Some(ref url) = url_str {
+                                if let Err(e) = http::download_file(
+                                    url,
+                                    &lib_jar,
+                                    &lib_jar
+                                        .file_name()
+                                        .unwrap_or_default()
+                                        .to_string_lossy(),
+                                    None,
+                                    2,
+                                    false,
+                                ) {
+                                    crate::warn_msg!(
+                                        "Could not download loader library {}: {}",
+                                        lib_jar.display(),
+                                        e
+                                    );
+                                }
+                            }
+                        }
+                        if lib_jar.exists() {
+                            extra_cp.push(lib_jar);
+                        } else {
+                            // Skip silently if it's a POM-only lib (no artifact, no url)
+                            let has_artifact =
+                                downloads.and_then(|d| d.get("artifact")).is_some();
+                            let has_url = lib.get("url").is_some();
+                            if has_artifact || has_url {
                                 crate::warn_msg!(
-                                    "Could not download loader library {}: {}",
-                                    lib_jar.display(),
-                                    e
+                                    "Loader library missing: {}",
+                                    lib_jar.display()
                                 );
                             }
                         }
-                    }
-                    if lib_jar.exists() {
-                        extra_cp.push(lib_jar);
-                    } else {
-                        crate::warn_msg!(
-                            "Loader library missing: {}",
-                            lib_jar.display()
-                        );
                     }
                 }
             }
